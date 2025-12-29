@@ -1,0 +1,851 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Puzzle CobWeb v0.3.2 (Rollback & Fix)</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&family=Noto+Sans+KR:wght@300;400;700&display=swap');
+
+        body {
+            font-family: 'Noto Sans KR', sans-serif;
+            background-color: #0f172a;
+            color: #e2e8f0;
+            overflow: hidden;
+            user-select: none;
+        }
+
+        /* === UI 스타일 === */
+        .neon-text { font-family: 'Orbitron', sans-serif; text-shadow: 0 0 5px #06b6d4; }
+        .neon-border { box-shadow: 0 0 10px #06b6d4, inset 0 0 5px #06b6d4; }
+        
+        .board-container {
+            width: 100%; max-width: 480px; aspect-ratio: 1/1;
+            display: grid; grid-template-columns: repeat(8, 1fr); grid-template-rows: repeat(8, 1fr);
+            border: 4px solid #334155; background-color: #1e293b;
+            position: relative; transition: all 0.3s ease; margin: 0 auto;
+        }
+
+        /* Turn Indicator Borders */
+        .board-container.turn-white { border-color: #94a3b8; box-shadow: 0 0 15px rgba(148, 163, 184, 0.5); }
+        .board-container.turn-black { border-color: #ef4444; box-shadow: 0 0 15px rgba(239, 68, 68, 0.4); }
+
+        /* Board Types Overrides */
+        .board-container.ice-type { background-color: #162c35; }
+        .board-container.ice-type .cell { background: rgba(165, 243, 252, 0.08); }
+        .board-container.mud-type { background-color: #2a1b12; }
+        .board-container.mud-type .cell { background: rgba(69, 26, 3, 0.2); }
+
+        .cell {
+            display: flex; justify-content: center; align-items: center;
+            font-size: 1.6rem; cursor: pointer; position: relative;
+        }
+        .cell.white { background-color: rgba(255,255,255,0.05); color: #94a3b8; }
+        .cell.black { background-color: rgba(0,0,0,0.2); color: #64748b; }
+        .cell.selected { background-color: rgba(6, 182, 212, 0.4) !important; }
+
+        /* Fog Visuals */
+        .fog-hidden::after {
+            content: ''; position: absolute; inset: 0; background: #020617; z-index: 20; opacity: 0.98;
+        }
+
+        /* Portal Visuals */
+        .portal-cell { box-shadow: inset 0 0 15px #a855f7; animation: pulse 2s infinite; }
+        .portal-cell::before { content: '🌀'; font-size: 0.8rem; position: absolute; bottom: 2px; left: 2px; }
+
+        /* Interaction Visuals */
+        .valid-move::after { content: ''; width: 12px; height: 12px; background: #22d3ee; border-radius: 50%; opacity: 0.7; box-shadow: 0 0 5px #22d3ee; z-index: 30; }
+        .valid-capture::after { content: ''; position: absolute; inset: 0; border: 3px solid #ef4444; box-shadow: inset 0 0 10px #ef4444; z-index: 30; }
+
+        /* Pieces */
+        .piece { z-index: 15; transition: transform 0.2s; position: relative; width: 100%; height: 100%; display: flex; justify-content: center; align-items: center; }
+        .piece.white-team { color: #f8fafc; text-shadow: 0 0 5px #fff; }
+        .piece.black-team { color: #ef4444; text-shadow: 0 0 5px #7f1d1d; }
+        .piece.neutral-team { color: #fbbf24; text-shadow: 0 0 5px #f59e0b; }
+
+        /* Target Mark */
+        .target-mark {
+            position: absolute; inset: 0; border: 2px dashed #facc15; border-radius: 50%;
+            animation: spin 4s linear infinite; pointer-events: none; z-index: 14;
+        }
+
+        /* Skill Badges */
+        .skill-badge {
+            position: absolute; top: -6px; right: -6px; width: 16px; height: 16px;
+            font-size: 9px; border-radius: 50%; border: 1.5px solid #fff;
+            display: flex; justify-content: center; align-items: center; color: white;
+            z-index: 16; box-shadow: 0 0 4px rgba(0,0,0,0.8);
+            cursor: help;
+        }
+        .skill-bomb { background: #ef4444; } 
+        .skill-shield { background: #3b82f6; } 
+        .skill-scout, .skill-ghost { background: #22c55e; } 
+        .skill-freeze, .skill-nuke { background: #a855f7; }
+        .skill-rage { background: #f97316; }
+
+        .frozen-effect { filter: grayscale(100%) brightness(1.5) drop-shadow(0 0 5px #38bdf8); }
+
+        /* HUD & Screens */
+        .screen { display: none; height: 100vh; flex-direction: column; align-items: center; justify-content: center; }
+        .screen.active { display: flex; }
+        .hud-panel { background: rgba(15, 23, 42, 0.95); border: 1px solid #334155; padding: 6px 10px; border-radius: 6px; }
+
+        @keyframes pulse { 0%, 100% { opacity: 0.5; } 50% { opacity: 1; } }
+        @keyframes spin { 100% { transform: rotate(360deg); } }
+    </style>
+</head>
+<body>
+
+    <!-- LOBBY -->
+    <div id="lobby-screen" class="screen active bg-slate-900">
+        <h1 class="text-5xl font-bold mb-2 neon-text text-cyan-400 text-center">PUZZLE COBWEB</h1>
+        <p class="text-slate-500 mb-8 text-xs tracking-[0.2em]">v0.3.2 // TREASURE BUG FIX</p>
+        <button onclick="startGame()" class="bg-slate-800 border border-cyan-500 text-cyan-400 py-3 px-8 rounded hover:bg-slate-700 font-bold neon-border">
+            START PUZZLE RUN
+        </button>
+        <div class="mt-4 text-[10px] text-slate-600 grid grid-cols-2 gap-x-8 gap-y-1 text-left">
+            <span>• 12 Roguelike Stages</span> <span>• Passive Skills Only</span>
+            <span>• Normalized Difficulty</span> <span>• Treasure Logic Fixed</span>
+        </div>
+    </div>
+
+    <!-- GAMEPLAY -->
+    <div id="game-screen" class="screen relative">
+        <!-- Top HUD -->
+        <div class="absolute top-2 w-full px-2 flex justify-between gap-2 max-w-lg z-40">
+            <div class="hud-panel flex flex-col items-center w-16">
+                <span class="text-[9px] text-slate-400">RUN</span>
+                <span class="text-lg font-bold text-amber-400"><span id="run-current">1</span><span class="text-[10px] text-slate-600">/12</span></span>
+            </div>
+            <div class="hud-panel flex-grow flex flex-col items-center justify-center">
+                <span class="text-[9px] text-slate-400 mb-0.5">OBJECTIVE</span>
+                <span id="goal-text" class="text-xs font-bold text-cyan-300 text-center">...</span>
+                <span id="goal-sub" class="text-[10px] text-slate-500 mt-0.5 hidden"></span>
+            </div>
+            <div class="hud-panel flex flex-col items-center w-16">
+                <span class="text-[9px] text-slate-400">LIFE</span>
+                <span id="lives-text" class="text-lg text-red-400 font-bold">♥♥♥</span>
+            </div>
+        </div>
+
+        <!-- Board Info -->
+        <div class="w-full max-w-lg flex justify-between items-end px-2 mb-1">
+            <div class="flex items-center gap-2">
+                <span id="board-badge" class="px-2 py-0.5 bg-slate-700 text-[10px] text-white rounded border border-slate-500">CLASSIC</span>
+            </div>
+            <div class="text-right">
+                <span class="text-[10px] text-slate-400">TURNS</span>
+                <span class="text-white font-bold text-lg"><span id="turn-now">0</span><span class="text-sm text-slate-500">/</span><span id="turn-max">0</span></span>
+            </div>
+        </div>
+
+        <!-- The Board -->
+        <div id="board" class="board-container rounded shadow-2xl"></div>
+
+        <!-- Bottom Status -->
+        <div class="mt-4 w-full max-w-lg px-4 text-center">
+            <div id="message-box" class="text-sm text-slate-300 min-h-[1.5rem] mb-2 font-bold transition-all duration-200">Initialize...</div>
+            <button onclick="goToLobby()" class="text-[10px] text-slate-600 hover:text-red-400 underline">ABORT RUN</button>
+        </div>
+
+        <!-- AI Overlay -->
+        <div id="ai-overlay" class="absolute inset-0 bg-black/10 z-50 hidden flex items-center justify-center pointer-events-none">
+            <div class="bg-slate-900/90 border border-cyan-500 px-4 py-2 text-cyan-400 text-sm rounded animate-pulse shadow-lg">
+                <i class="fas fa-brain mr-2"></i>AI THINKING...
+            </div>
+        </div>
+    </div>
+
+    <!-- RESULT MODAL -->
+    <div id="modal" class="fixed inset-0 bg-black/90 z-50 hidden flex items-center justify-center p-4">
+        <div class="bg-slate-800 border border-slate-600 rounded-lg p-6 max-w-sm w-full text-center shadow-2xl">
+            <h2 id="modal-title" class="text-2xl font-bold mb-2 text-white">RESULT</h2>
+            <div id="modal-reason" class="text-sm text-slate-400 mb-6">Details</div>
+            <button id="modal-btn" onclick="nextRun()" class="w-full bg-cyan-600 hover:bg-cyan-500 text-white font-bold py-3 rounded">CONTINUE</button>
+        </div>
+    </div>
+
+    <script>
+        // === DATA: PASSIVE SKILLS ===
+        const SKILLS = [
+            { id: 'bomb', name: 'Bomb', icon: '💣', desc: '사망 시 주변 3x3 폭발' },
+            { id: 'shield', name: 'Shield', icon: '🛡️', desc: '1회 방어 (데미지 무효)' },
+            { id: 'scout', name: 'Scout', icon: '👟', desc: '이동 거리 +1' },
+            { id: 'rage', name: 'Rage', icon: '💢', desc: '처치 시 1회 추가 이동' },
+            { id: 'ghost', name: 'Ghost', icon: '👻', desc: '유닛 통과 가능' },
+            { id: 'freeze', name: 'Freeze', icon: '❄️', desc: '주변 적 이동 불가' },
+            { id: 'sniper', name: 'Sniper', icon: '🔭', desc: '사거리 무제한' },
+            { id: 'push', name: 'Push', icon: '✋', desc: '공격 시 적을 밀어냄' },
+            { id: 'king_slayer', name: 'Slayer', icon: '👑', desc: '킹 상대로 확정 킬' },
+            { id: 'immortal', name: 'God', icon: '🌟', desc: '3턴간 무적' },
+            { id: 'heavy', name: 'Heavy', icon: '🧱', desc: '밀려나지 않음' },
+            { id: 'burn', name: 'Burn', icon: '🔥', desc: '공격 시 화상 부여' },
+            { id: 'nuke', name: 'Nuke', icon: '☢️', desc: '사망 시 맵 전체 랜덤 1킬' }
+        ];
+
+        // === CONSTANTS ===
+        const PIECES = {
+            white: { k: '♔', q: '♕', r: '♖', b: '♗', n: '♘', p: '♙' },
+            black: { k: '♚', q: '♛', r: '♜', b: '♝', n: '♞', p: '♟' },
+            neutral: { treasure: '💎' }
+        };
+        const PIECE_VALS = { k: 1000, q: 90, r: 50, b: 30, n: 30, p: 10, treasure: 50 };
+
+        // === STATE ===
+        let state = {
+            run: 1,
+            lives: 3,
+            board: [],
+            portals: [], 
+            fog: [],
+            turn: 'white',
+            turnCount: 0,
+            maxTurns: 10,
+            boardType: 'classic',
+            goal: {},
+            selected: null,
+            validMoves: [],
+            eliminatedCount: 0,
+            isGameOver: false,
+            extraTurn: false 
+        };
+
+        // === INIT ===
+        function startGame() {
+            state.run = 1; 
+            state.lives = 3;
+            startRun();
+            document.querySelectorAll('.screen').forEach(e => e.classList.remove('active'));
+            document.getElementById('game-screen').classList.add('active');
+        }
+
+        function goToLobby() {
+            document.querySelectorAll('.screen').forEach(e => e.classList.remove('active'));
+            document.getElementById('lobby-screen').classList.add('active');
+        }
+
+        function startRun() {
+            // Difficulty Normalization (Linear scaling)
+            const diff = 0.1 + (state.run - 1) * 0.1; 
+            
+            // Board Type Logic
+            const types = ['classic', 'ice', 'mud', 'portal', 'fog'];
+            if (state.run <= 2) state.boardType = 'classic';
+            else if (state.run <= 4) state.boardType = Math.random() < 0.5 ? 'classic' : types[Math.floor(Math.random() * 3)];
+            else state.boardType = types[Math.floor(Math.random() * types.length)];
+            
+            state.maxTurns = 10; 
+
+            createBoard(diff);
+            generateGoal();
+            assignSkills(diff);
+
+            // Reset
+            state.turn = 'white';
+            state.turnCount = 1;
+            state.eliminatedCount = 0;
+            state.isGameOver = false;
+            state.selected = null;
+            state.validMoves = [];
+            state.extraTurn = false;
+            
+            updateFog();
+            render();
+            document.getElementById('modal').classList.add('hidden');
+        }
+
+        function createBoard(diff) {
+            state.board = Array(8).fill(null).map(() => Array(8).fill(null));
+            state.portals = [];
+            
+            placePiece(7, 4, 'k', 'white');
+            placePiece(0, 4, 'k', 'black');
+
+            const pool = ['q','r','r','b','b','n','n','p','p','p','p'];
+            
+            // Player pieces (Always 8)
+            for(let i=0; i<8; i++) placeRandom('white', [6,7], pool);
+            
+            // Enemy Count (Smooth scaling: 8 -> 14)
+            const enemyCount = Math.min(14, 8 + Math.floor((state.run - 1) * 0.6));
+            for(let i=0; i<enemyCount; i++) placeRandom('black', [0,1,2], pool);
+
+            if (state.boardType === 'portal') {
+                for(let i=0; i<4; i++) {
+                    let r, c;
+                    do { r=Math.floor(Math.random()*6)+1; c=Math.floor(Math.random()*8); } while(state.board[r][c]);
+                    state.portals.push({r,c, link: (i%2===0 ? i+1 : i-1)});
+                }
+            }
+        }
+
+        function placeRandom(color, rows, pool) {
+            let placed = false, tries = 0;
+            while(!placed && tries++ < 50) {
+                let r = rows[Math.floor(Math.random()*rows.length)];
+                let c = Math.floor(Math.random()*8);
+                if(!state.board[r][c]) {
+                    const type = pool[Math.floor(Math.random()*pool.length)];
+                    placePiece(r, c, type, color);
+                    placed = true;
+                }
+            }
+        }
+
+        function placePiece(r, c, type, color) {
+            state.board[r][c] = {
+                type, color, 
+                id: `${color}_${type}_${Math.random().toString(36).substr(2,5)}`,
+                skill: null
+            };
+        }
+
+        function generateGoal() {
+            const goals = ['king_slayer', 'bounty_hunter', 'survive', 'blitz', 'reaper', 'escort', 'treasure', 'boss_raid'];
+            let validGoals = [...goals];
+            
+            const blacks = getAllPieces('black'); 
+            const whites = getAllPieces('white');
+            let type = validGoals[Math.floor(Math.random() * validGoals.length)];
+            
+            state.goal = { type };
+            // Base turn limit
+            state.maxTurns = 10 + Math.floor(Math.random() * 4); 
+            if (state.boardType === 'mud') state.maxTurns += 3;
+
+            if (type === 'king_slayer') {
+                state.goal.desc = "적 킹(King) 처치";
+            }
+            else if (type === 'bounty_hunter') {
+                const targets = blacks.filter(p => ['q','r','b'].includes(p.type));
+                const target = targets.length ? targets[0] : blacks[0];
+                state.goal.targetId = target.id;
+                state.goal.desc = `현상수배: ${target.type.toUpperCase()}`;
+            }
+            else if (type === 'survive') {
+                const turns = 6 + Math.floor(Math.random() * 3); 
+                state.maxTurns = turns;
+                state.goal.desc = `${turns}턴 생존 (버티기)`;
+            }
+            else if (type === 'blitz') {
+                state.maxTurns = 15 + Math.floor(Math.random() * 6);
+                state.goal.desc = "아군 폰을 끝까지 이동";
+                if (!whites.some(p=>p.type==='p')) { state.goal = { type:'reaper', count: 3, desc:"적 3기 처치" }; }
+            }
+            else if (type === 'reaper') {
+                // Min 3 kills to avoid accidental quick win
+                const count = Math.max(3, 3 + Math.floor((state.run-1)/3));
+                state.goal.count = count;
+                state.maxTurns = 12 + count;
+                state.goal.desc = `적 기물 ${count}기 처치`;
+            }
+            else if (type === 'escort') {
+                const vips = whites.filter(p => p.type !== 'k');
+                if (vips.length === 0) { 
+                    state.goal = { type:'survive', turns:5, desc:"5턴 생존" }; 
+                    state.maxTurns = 5; 
+                } else {
+                    const vip = vips[Math.floor(Math.random()*vips.length)];
+                    state.goal.vipId = vip.id;
+                    state.maxTurns = 8 + Math.floor(Math.random() * 4);
+                    state.goal.desc = `VIP 호위 (${state.maxTurns}턴 버티기)`;
+                }
+            }
+            else if (type === 'treasure') {
+                let r, c;
+                do { r=Math.floor(Math.random()*3); c=Math.floor(Math.random()*8); } while(state.board[r][c]);
+                state.board[r][c] = { type: 'treasure', color: 'neutral', id: 'treasure_chest' };
+                state.goal.targetId = 'treasure_chest';
+                state.goal.desc = "보물상자 획득 (백색 기물로 이동)";
+            }
+            else if (type === 'boss_raid') {
+                const boss = blacks[Math.floor(Math.random()*blacks.length)];
+                state.goal.bossId = boss.id;
+                state.goal.desc = `BOSS(${boss.type.toUpperCase()}) 처치`;
+                boss.skill = 'immortal';
+            }
+        }
+
+        function assignSkills(diff) {
+            const playerSkillCount = 3 + Math.floor((state.run - 1) / 4);
+            const enemySkillChance = 0.1 + ((state.run - 1) * 0.05);
+
+            // Player Skills
+            const whites = getAllPieces('white').filter(p=>p.type!=='k');
+            whites.sort(() => 0.5 - Math.random());
+            for(let i=0; i<Math.min(playerSkillCount, whites.length); i++) {
+                const s = SKILLS[Math.floor(Math.random() * SKILLS.length)];
+                if (s.id !== 'immortal') state.board[whites[i].r][whites[i].c].skill = s.id;
+            }
+
+            // Enemy Skills
+            const blacks = getAllPieces('black').filter(p=>p.type!=='k');
+            for (let p of blacks) {
+                if (Math.random() < enemySkillChance) {
+                    const s = SKILLS[Math.floor(Math.random() * SKILLS.length)];
+                    state.board[p.r][p.c].skill = s.id;
+                }
+            }
+        }
+
+        // === LOGIC ===
+        function getAllPieces(color) {
+            let list = [];
+            for(let r=0; r<8; r++) for(let c=0; c<8; c++) 
+                if(state.board[r][c] && state.board[r][c].color === color) list.push({...state.board[r][c], r, c});
+            return list;
+        }
+
+        function updateFog() {
+            if (state.boardType !== 'fog') return;
+            state.fog = Array(8).fill(null).map(()=>Array(8).fill(false));
+            getAllPieces('white').forEach(p => {
+                for(let dr=-1; dr<=1; dr++) for(let dc=-1; dc<=1; dc++) {
+                    const nr=p.r+dr, nc=p.c+dc;
+                    if(nr>=0 && nr<8 && nc>=0 && nc<8) state.fog[nr][nc] = true;
+                }
+            });
+        }
+
+        function isFrozen(r, c, myColor) {
+            const rInt = parseInt(r);
+            const cInt = parseInt(c);
+            
+            for(let dr=-1; dr<=1; dr++) for(let dc=-1; dc<=1; dc++) {
+                const nr=rInt+dr, nc=cInt+dc;
+                if(nr>=0 && nr<8 && nc>=0 && nc<8) {
+                    const p = state.board[nr][nc];
+                    if(p && p.color !== myColor && p.skill === 'freeze') return true;
+                }
+            }
+            return false;
+        }
+
+        function checkClick(r, c) {
+            if (state.isGameOver || state.turn !== 'white') return;
+            const piece = state.board[r][c];
+            
+            if (state.selected && state.validMoves.some(m => m.r===r && m.c===c)) {
+                movePiece(state.selected, {r,c});
+                return;
+            }
+
+            if (piece && piece.color === 'white') {
+                if (isFrozen(r, c, 'white')) {
+                    showMessage("❄️ FROZEN! 이동 불가", "red");
+                    return;
+                }
+                
+                if (piece.skill) {
+                    const s = SKILLS.find(x=>x.id===piece.skill);
+                    showMessage(`[${s.name}] ${s.desc}`, "cyan");
+                } else {
+                    showMessage("기물 선택됨");
+                }
+
+                state.selected = {r,c};
+                state.validMoves = getMoves(r,c, piece);
+                render();
+            } 
+            else if (piece && piece.color === 'black') {
+                 if (piece.skill) {
+                    const s = SKILLS.find(x=>x.id===piece.skill);
+                    showMessage(`적군 [${s.name}] ${s.desc}`, "red");
+                } else {
+                    showMessage("적군 기물 (스킬 없음)", "slate");
+                }
+                state.selected = null;
+                state.validMoves = [];
+                render();
+            }
+            else {
+                state.selected = null;
+                state.validMoves = [];
+                render();
+            }
+        }
+
+        function getMoves(r, c, piece) {
+            let moves = [];
+            const rInt = parseInt(r);
+            const cInt = parseInt(c);
+            
+            const directions = {
+                straight: [[-1,0],[1,0],[0,-1],[0,1]],
+                diag: [[-1,-1],[-1,1],[1,-1],[1,1]],
+                knight: [[-2,-1],[-2,1],[-1,-2],[-1,2],[1,-2],[1,2],[2,-1],[2,1]]
+            };
+
+            const isMud = state.boardType === 'mud';
+            const isScout = piece.skill === 'scout';
+            const isSniper = piece.skill === 'sniper';
+            const isGhost = piece.skill === 'ghost';
+
+            const canStep = (nr, nc) => {
+                if(nr<0||nr>7||nc<0||nc>7) return 'OB';
+                const t = state.board[nr][nc];
+                if(!t) return 'EMPTY';
+                if(t.color !== piece.color) return 'CAP';
+                return 'BLK';
+            }
+
+            if (piece.type === 'p') {
+                const d = piece.color==='white'?-1:1;
+                const maxStep = isScout ? 2 : 1;
+                for(let i=1; i<=maxStep; i++) {
+                     if(canStep(rInt+d*i, cInt)==='EMPTY') {
+                         moves.push({r:rInt+d*i, c:cInt});
+                         if (!isMud && i===1 && rInt===(piece.color==='white'?6:1) && canStep(rInt+d*2, cInt)==='EMPTY') {
+                             moves.push({r:rInt+d*2, c:cInt});
+                         }
+                     } else break;
+                }
+                [[d,-1],[d,1]].forEach(([dr,dc]) => { if(canStep(rInt+dr,cInt+dc)==='CAP') moves.push({r:rInt+dr,c:cInt+dc}); });
+            } 
+            else if (piece.type === 'n') {
+                directions.knight.forEach(([dr,dc]) => {
+                    const res = canStep(rInt+dr, cInt+dc);
+                    if(res==='EMPTY'||res==='CAP') moves.push({r:rInt+dr, c:cInt+dc});
+                });
+            }
+            else {
+                const defaultRange = (piece.type === 'k' || isMud) ? 1 : 8;
+                let range = defaultRange;
+                if (isScout) range += 1;
+                if (isSniper) range = 8;
+
+                let dirs = [];
+                if(['r','q','k'].includes(piece.type)) dirs.push(...directions.straight);
+                if(['b','q','k'].includes(piece.type)) dirs.push(...directions.diag);
+
+                dirs.forEach(([dr,dc]) => {
+                    let nr=rInt, nc=cInt, dist=0;
+                    while(dist < range) {
+                        nr+=dr; nc+=dc; dist++;
+                        const res = canStep(nr, nc);
+                        if (res === 'OB') break;
+                        if (res === 'BLK') { if (!isGhost) break; }
+                        if (res === 'EMPTY' || res === 'CAP') { moves.push({r:nr, c:nc}); }
+                        if (res === 'CAP') break;
+                    }
+                });
+            }
+            return moves;
+        }
+
+        function movePiece(from, to) {
+            const p = state.board[from.r][from.c];
+            let target = state.board[to.r][to.c];
+            let actualCapture = false;
+
+            state.board[to.r][to.c] = p;
+            state.board[from.r][from.c] = null;
+
+            if (state.boardType === 'portal') {
+                const portal = state.portals.find(x => x.r===to.r && x.c===to.c);
+                if (portal) {
+                    const dest = state.portals[portal.link];
+                    if (!state.board[dest.r][dest.c]) {
+                        state.board[dest.r][dest.c] = p;
+                        state.board[to.r][to.c] = null;
+                        to = {r: dest.r, c: dest.c};
+                        showMessage("🌀 Portal Warp!", "purple");
+                    }
+                }
+            }
+
+            if (p.skill === 'push' && target) {
+                 if (target.skill === 'heavy') {
+                      showMessage("🧱 Heavy (No Push)", "blue");
+                      actualCapture = true; 
+                 } else {
+                     const dr = Math.sign(to.r - from.r);
+                     const dc = Math.sign(to.c - from.c);
+                     const pr = to.r + dr, pc = to.c + dc;
+                     
+                     if (pr>=0 && pr<8 && pc>=0 && pc<8 && !state.board[pr][pc]) {
+                         state.board[pr][pc] = target;
+                         state.board[to.r][to.c] = p; 
+                         showMessage("✋ Push!", "red");
+                         target = null; 
+                     } else {
+                         showMessage("✋ Push & Crush!", "red");
+                         actualCapture = true;
+                     }
+                 }
+            } else if (target) {
+                actualCapture = true;
+            }
+
+            if (target && actualCapture) {
+                if (target.skill === 'shield') { 
+                    showMessage("🛡️ Shield Block!", "blue"); 
+                    state.board[to.r][to.c] = target; 
+                    target.skill=null; 
+                    state.board[from.r][from.c] = p; 
+                    endTurnLogic();
+                    return; 
+                }
+
+                if (target.skill === 'bomb') { showMessage("💣 Bomb Triggered!", "red"); clearArea(to.r, to.c); }
+                if (target.skill === 'nuke') { showMessage("☢️ NUKE!", "purple"); triggerNuke(target.color); }
+                
+                state.eliminatedCount++;
+                
+                if (p.skill === 'rage') {
+                    state.extraTurn = true;
+                    showMessage("💢 Rage! 추가 턴!", "red");
+                }
+            }
+
+            state.selected = null;
+            state.validMoves = [];
+            
+            if (checkWin(p, target, to)) return;
+            if (checkDefeatImmediately()) return;
+
+            if (state.extraTurn) {
+                state.extraTurn = false;
+                if (state.turn === 'black') setTimeout(aiMove, 600);
+                else render();
+            } else {
+                endTurnLogic();
+            }
+        }
+
+        function endTurnLogic() {
+            state.turn = state.turn==='white'?'black':'white';
+            if (state.turn === 'black') {
+                document.getElementById('ai-overlay').classList.remove('hidden');
+                setTimeout(aiMove, 600);
+            } else {
+                document.getElementById('ai-overlay').classList.add('hidden');
+                state.turnCount++;
+                updateFog();
+                checkTurnDefeat();
+                render();
+            }
+        }
+
+        function clearArea(r, c) {
+            for(let dr=-1;dr<=1;dr++) for(let dc=-1;dc<=1;dc++) {
+                const nr=r+dr, nc=c+dc;
+                if(nr>=0 && nr<8 && nc>=0 && nc<8 && state.board[nr][nc]) {
+                     if(state.board[nr][nc].type !== 'k') state.board[nr][nc] = null;
+                }
+            }
+        }
+
+        function triggerNuke(deadColor) {
+            const targetColor = deadColor === 'white' ? 'black' : 'white';
+            let targets = [];
+            for(let r=0;r<8;r++) for(let c=0;c<8;c++) {
+                if(state.board[r][c] && state.board[r][c].color === targetColor && state.board[r][c].type !== 'k') {
+                    targets.push({r,c});
+                }
+            }
+            if(targets.length > 0) {
+                const t = targets[Math.floor(Math.random()*targets.length)];
+                state.board[t.r][t.c] = null;
+            }
+        }
+
+        function aiMove() {
+            const blacks = getAllPieces('black');
+            if(!blacks.length) { endTurnLogic(); return; }
+
+            let bestMove = null;
+            let maxScore = -99999;
+
+            for (let p of blacks) {
+                if (isFrozen(p.r, p.c, 'black')) continue;
+                const moves = getMoves(p.r, p.c, p);
+                for (let m of moves) {
+                    let score = 0;
+                    const target = state.board[m.r][m.c];
+                    
+                    if (target) {
+                        const val = PIECE_VALS[target.type] || 5;
+                        score += val * 10;
+                        if (target.type === 'k') score += 10000; 
+                    }
+                    score += m.r * 2; 
+                    score += Math.random() * 5;
+
+                    if (score > maxScore) {
+                        maxScore = score;
+                        bestMove = { from: p, to: m };
+                    }
+                }
+            }
+
+            if (bestMove) {
+                movePiece(bestMove.from, bestMove.to);
+            } else {
+                endTurnLogic();
+            }
+        }
+
+        function checkWin(mover, target, pos) {
+             let win = false;
+            const g = state.goal;
+            if (g.type === 'king_slayer' && target?.type === 'k') win = true;
+            if (g.type === 'bounty_hunter' && target?.id === g.targetId) win = true;
+            
+            // Treasure Logic Fix: Only win if Player (White) captures it
+            if (g.type === 'treasure' && target?.id === 'treasure_chest') {
+                if (mover.color === 'white') {
+                    win = true;
+                } else {
+                    showMessage("AI destroyed Treasure!", "red");
+                    // AI destroyed it, but game doesn't end immediately unless it was the only goal?
+                    // For now, let's treat it as failure if AI gets it, or just it's gone.
+                    // Better UX: AI simply removes it, player loses condition to win -> eventually loss by turns or restart
+                    // But to prevent softlock, let's trigger Loss.
+                    gameOver(false, "Treasure Destroyed by Enemy");
+                    return true;
+                }
+            }
+            
+            if (g.type === 'boss_raid' && target?.id === g.bossId) win = true;
+            if (g.type === 'reaper' && state.eliminatedCount >= g.count) win = true;
+            if (g.type === 'blitz' && mover.color === 'white' && mover.type === 'p' && pos.r === 0) win = true;
+            
+            if (win) { endGame(true, "MISSION COMPLETE"); return true; }
+            return false;
+        }
+
+        function checkDefeatImmediately() {
+            if (getAllPieces('white').length === 0) { endGame(false, "Lossmate: 전멸했습니다."); return true; }
+            if (state.goal.type === 'escort') {
+                const vip = getAllPieces('white').find(p => p.id === state.goal.vipId);
+                if (!vip) { endGame(false, "Locationmate: VIP가 사망했습니다."); return true; }
+            }
+            return false;
+        }
+
+        function checkTurnDefeat() {
+            if ((state.goal.type === 'survive' || state.goal.type === 'escort') && state.turnCount > state.maxTurns) {
+                endGame(true, "MISSION SUCCESS!");
+                return;
+            }
+            if (state.turnCount > state.maxTurns) {
+                endGame(false, "Turnmate: 턴 제한 초과.");
+            }
+        }
+
+        function endGame(success, reason) {
+            state.isGameOver = true;
+            document.getElementById('ai-overlay').classList.add('hidden');
+            render();
+            const m = document.getElementById('modal');
+            m.classList.remove('hidden');
+            document.getElementById('modal-title').innerText = success ? "VICTORY" : "DEFEAT";
+            document.getElementById('modal-title').className = success ? "text-2xl font-bold mb-2 text-cyan-400" : "text-2xl font-bold mb-2 text-red-500";
+            document.getElementById('modal-reason').innerText = reason;
+            
+            const btn = document.getElementById('modal-btn');
+            if (success) {
+                btn.onclick = () => { state.run++; startRun(); };
+                btn.innerText = "NEXT RUN >>";
+            } else {
+                state.lives--;
+                if(state.lives > 0) {
+                    btn.onclick = startRun;
+                    btn.innerText = "RETRY LEVEL";
+                } else {
+                    btn.onclick = goToLobby;
+                    btn.innerText = "GAME OVER";
+                }
+            }
+        }
+
+        function nextRun() {
+            if (state.run >= 12) {
+                goToLobby();
+            } else {
+                state.run++;
+                startRun();
+            }
+        }
+
+        function showMessage(msg, color='amber') { 
+            const box = document.getElementById('message-box');
+            box.innerText = msg;
+            box.className = `text-sm min-h-[1.5rem] mb-2 font-bold transition-all duration-200 text-${color}-300`;
+            box.classList.add('scale-110');
+            setTimeout(() => box.classList.remove('scale-110'), 200);
+        }
+
+        function render() {
+            const b = document.getElementById('board');
+            b.innerHTML = '';
+            let borderColor = state.turn === 'white' ? 'turn-white' : 'turn-black';
+            b.className = `board-container rounded shadow-2xl ${state.boardType}-type ${borderColor}`;
+            document.getElementById('board-badge').innerText = state.boardType.toUpperCase();
+
+            for(let r=0; r<8; r++) for(let c=0; c<8; c++) {
+                const cell = document.createElement('div');
+                cell.className = `cell ${(r+c)%2===0?'white':'black'}`;
+                
+                if (state.boardType === 'fog' && !state.fog[r][c]) cell.classList.add('fog-hidden');
+                if (state.boardType === 'portal' && state.portals.some(x=>x.r===r && x.c===c)) cell.classList.add('portal-cell');
+
+                if (state.validMoves.some(m=>m.r===r && m.c===c)) {
+                    state.board[r][c] ? cell.classList.add('valid-capture') : cell.classList.add('valid-move');
+                }
+                
+                if (state.selected && state.selected.r===r && state.selected.c===c) cell.classList.add('selected');
+
+                const p = state.board[r][c];
+                if (p) {
+                    const span = document.createElement('span');
+                    span.className = `piece ${p.color}-team`;
+                    if (p.type === 'treasure') span.className = `piece neutral-team`;
+                    span.textContent = p.type==='treasure' ? '💎' : PIECES[p.color][p.type];
+                    
+                    // Skill Badge
+                    if(p.skill) {
+                        const s = SKILLS.find(x=>x.id===p.skill);
+                        const badge = document.createElement('div');
+                        badge.className = `skill-badge skill-${p.skill}`;
+                        badge.textContent = s ? s.icon : '?';
+                        span.appendChild(badge);
+                    }
+
+                    const g = state.goal;
+                    if ((g.type==='bounty_hunter' && p.id===g.targetId) || 
+                        (g.type==='escort' && p.id===g.vipId) ||
+                        (g.type==='boss_raid' && p.id===g.bossId) ||
+                        (g.type==='treasure' && p.id==='treasure_chest')) {
+                        const mark = document.createElement('div');
+                        mark.className = 'target-mark';
+                        mark.style.borderColor = g.type==='escort' ? '#4ade80' : '#facc15';
+                        span.appendChild(mark);
+                    }
+                    if (isFrozen(r, c, p.color)) span.classList.add('frozen-effect'); 
+                    cell.appendChild(span);
+                }
+                cell.onclick = () => checkClick(r,c);
+                b.appendChild(cell);
+            }
+
+            document.getElementById('run-current').innerText = state.run;
+            document.getElementById('turn-now').innerText = state.turnCount;
+            document.getElementById('turn-max').innerText = state.maxTurns;
+            document.getElementById('goal-text').innerText = state.goal.desc;
+            document.getElementById('lives-text').innerText = '♥'.repeat(state.lives);
+            
+            if (state.goal.type === 'reaper') {
+                const sub = document.getElementById('goal-sub');
+                sub.classList.remove('hidden');
+                sub.innerText = `(${state.eliminatedCount}/${state.goal.count})`;
+            } else {
+                 document.getElementById('goal-sub').classList.add('hidden');
+            }
+        }
+    </script>
+</body>
+</html>
