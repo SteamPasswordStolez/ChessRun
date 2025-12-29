@@ -1,851 +1,909 @@
-<!DOCTYPE html>
-<html lang="ko">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Puzzle CobWeb v0.3.2 (Rollback & Fix)</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
-    <style>
-        @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&family=Noto+Sans+KR:wght@300;400;700&display=swap');
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { 
+  Shield, Sword, Zap, Skull, Crosshair, 
+  Cpu, User, Activity, Heart, Flame, MousePointer2, Timer, Wind, Hand,
+  Play, RotateCcw, Ghost
+} from 'lucide-react';
 
-        body {
-            font-family: 'Noto Sans KR', sans-serif;
-            background-color: #0f172a;
-            color: #e2e8f0;
-            overflow: hidden;
-            user-select: none;
-        }
+// --- 타입 정의 ---
+type Color = 'blue' | 'red';
+type Role = 'Minion' | 'Assassin' | 'Mage' | 'Tank' | 'Carry' | 'Nexus';
+type PieceType = 'p' | 'n' | 'b' | 'r' | 'q' | 'k';
+type SkillKey = 'Q' | 'W' | 'E' | 'R';
+type GameStatus = 'lobby' | 'countdown' | 'playing' | 'gameover';
 
-        /* === UI 스타일 === */
-        .neon-text { font-family: 'Orbitron', sans-serif; text-shadow: 0 0 5px #06b6d4; }
-        .neon-border { box-shadow: 0 0 10px #06b6d4, inset 0 0 5px #06b6d4; }
+interface Skill {
+  key: SkillKey;
+  name: string;
+  manaCost: number;
+  range: number;
+  damageRatio: number;
+  type: 'damage' | 'heal' | 'buff_def';
+  desc: string;
+  cooldown: number;
+}
+
+interface Piece {
+  id: string;
+  type: PieceType;
+  role: Role;
+  color: Color;
+  hp: number;
+  maxHp: number;
+  mana: number;
+  maxMana: number;
+  attack: number;
+  defense: number;
+  value: number;
+  level: number;
+  xp: number;
+  maxXp: number;
+  skills: Skill[];
+  speed: number;
+  currentCooldown: number;
+  maxCooldown: number;
+}
+
+interface DeadPiece {
+  piece: Piece;
+  respawnTimeLeft: number; // ms 단위
+}
+
+interface Position {
+  row: number;
+  col: number;
+}
+
+interface VisualEffect {
+  id: number;
+  row: number;
+  col: number;
+  type: 'hit' | 'crit' | 'heal' | 'buff' | 'explosion' | 'levelUp' | 'projectile';
+  text?: string;
+}
+
+interface Difficulty {
+  label: string;
+  aiDelay: number; // AI 행동 간격 (ms)
+  color: string;
+}
+
+const DIFFICULTIES: Difficulty[] = [
+  { label: '매우 쉬움', aiDelay: 3000, color: 'text-green-400 border-green-400' },
+  { label: '쉬움', aiDelay: 2000, color: 'text-blue-400 border-blue-400' },
+  { label: '보통', aiDelay: 1200, color: 'text-yellow-400 border-yellow-400' },
+  { label: '어려움', aiDelay: 800, color: 'text-orange-500 border-orange-500' },
+  { label: '매우 어려움', aiDelay: 500, color: 'text-red-500 border-red-500' },
+  { label: '탈인간', aiDelay: 200, color: 'text-purple-500 border-purple-500 animate-pulse' },
+];
+
+// --- 데이터 설정 ---
+const getSkills = (role: Role): Skill[] => {
+  switch (role) {
+    case 'Minion': return [{ key: 'Q', name: '강타', manaCost: 30, range: 1, damageRatio: 1.5, type: 'damage', desc: '강력한 공격', cooldown: 3 }];
+    case 'Assassin': return [
+      { key: 'Q', name: '단검', manaCost: 40, range: 3, damageRatio: 1.2, type: 'damage', desc: '원거리 견제', cooldown: 2 },
+      { key: 'R', name: '암살', manaCost: 100, range: 1, damageRatio: 3.0, type: 'damage', desc: '치명타', cooldown: 10 }
+    ];
+    case 'Mage': return [
+      { key: 'W', name: '치유', manaCost: 50, range: 3, damageRatio: 1.5, type: 'heal', desc: '아군 회복', cooldown: 5 },
+      { key: 'R', name: '메테오', manaCost: 100, range: 4, damageRatio: 2.5, type: 'damage', desc: '광역 피해', cooldown: 8 }
+    ];
+    case 'Tank': return [
+      { key: 'W', name: '철벽', manaCost: 40, range: 0, damageRatio: 0, type: 'buff_def', desc: '방어 증가', cooldown: 6 },
+      { key: 'E', name: '지진', manaCost: 60, range: 1, damageRatio: 1.8, type: 'damage', desc: '주변 강타', cooldown: 5 }
+    ];
+    case 'Carry': return [
+      { key: 'Q', name: '저격', manaCost: 30, range: 4, damageRatio: 1.3, type: 'damage', desc: '장거리 사격', cooldown: 3 },
+      { key: 'R', name: '난사', manaCost: 100, range: 7, damageRatio: 2.5, type: 'damage', desc: '초장거리', cooldown: 12 }
+    ];
+    case 'Nexus': return [
+       { key: 'Q', name: '레이저', manaCost: 20, range: 5, damageRatio: 1.5, type: 'damage', desc: '방어 사격', cooldown: 2 },
+       { key: 'R', name: '행성파괴', manaCost: 150, range: 99, damageRatio: 3.0, type: 'damage', desc: '전체 공격', cooldown: 30 }
+    ];
+    default: return [];
+  }
+};
+
+const getBaseStats = (type: PieceType): Omit<Piece, 'id' | 'color' | 'level' | 'xp' | 'maxXp' | 'skills' | 'currentCooldown' | 'maxCooldown'> => {
+  switch (type) {
+    case 'p': return { role: 'Minion', hp: 200, maxHp: 200, mana: 0, maxMana: 100, attack: 40, defense: 10, value: 100, speed: 2.5 };
+    case 'n': return { role: 'Assassin', hp: 250, maxHp: 250, mana: 50, maxMana: 100, attack: 90, defense: 15, value: 350, speed: 4.0 };
+    case 'b': return { role: 'Mage', hp: 220, maxHp: 220, mana: 50, maxMana: 100, attack: 85, defense: 5, value: 350, speed: 2.0 };
+    case 'r': return { role: 'Tank', hp: 600, maxHp: 600, mana: 50, maxMana: 150, attack: 50, defense: 40, value: 550, speed: 1.5 };
+    case 'q': return { role: 'Carry', hp: 350, maxHp: 350, mana: 50, maxMana: 150, attack: 120, defense: 20, value: 900, speed: 3.0 };
+    case 'k': return { role: 'Nexus', hp: 5000, maxHp: 5000, mana: 100, maxMana: 300, attack: 50, defense: 60, value: 9999, speed: 5.0 };
+    default: return { role: 'Minion', hp: 200, maxHp: 200, mana: 0, maxMana: 100, attack: 40, defense: 10, value: 100, speed: 2.0 };
+  }
+};
+
+const createPiece = (type: PieceType, color: Color, idSuffix: string): Piece => {
+  const stats = getBaseStats(type);
+  return {
+    ...stats,
+    id: `${color}-${type}-${idSuffix}`,
+    type,
+    color,
+    level: 1,
+    xp: 0,
+    maxXp: 100,
+    skills: getSkills(stats.role),
+    currentCooldown: 0,
+    maxCooldown: 100
+  };
+};
+
+const initialBoardSetup = (): (Piece | null)[][] => {
+  const board = Array(8).fill(null).map(() => Array(8).fill(null));
+  const backRow: PieceType[] = ['r', 'n', 'b', 'q', 'k', 'b', 'n', 'r'];
+  backRow.forEach((type, col) => board[0][col] = createPiece(type, 'red', `0-${col}`));
+  Array(8).fill(null).forEach((_, col) => board[1][col] = createPiece('p', 'red', `1-${col}`));
+  Array(8).fill(null).forEach((_, col) => board[6][col] = createPiece('p', 'blue', `6-${col}`));
+  backRow.forEach((type, col) => board[7][col] = createPiece(type, 'blue', `7-${col}`));
+  return board;
+};
+
+const getPieceIcon = (type: PieceType) => {
+  const icons: Record<string, string> = { 'k': '♚', 'q': '♛', 'r': '♜', 'b': '♝', 'n': '♞', 'p': '♟︎' };
+  return icons[type];
+};
+
+const isValidPos = (r: number, c: number) => r >= 0 && r < 8 && c >= 0 && c < 8;
+
+export default function RealTimeActionChess() {
+  const [gameStatus, setGameStatus] = useState<GameStatus>('lobby');
+  const [selectedDifficulty, setSelectedDifficulty] = useState<Difficulty>(DIFFICULTIES[2]); // Default Normal
+  const [countDown, setCountDown] = useState(3);
+  
+  const [board, setBoard] = useState<(Piece | null)[][]>(initialBoardSetup());
+  const [graveyard, setGraveyard] = useState<DeadPiece[]>([]);
+  
+  const [selectedPos, setSelectedPos] = useState<Position | null>(null);
+  const [validMoves, setValidMoves] = useState<Position[]>([]);
+  const [logs, setLogs] = useState<string[]>(['로비 입장...']);
+  const [winner, setWinner] = useState<string | null>(null);
+  
+  const [activeSkill, setActiveSkill] = useState<Skill | null>(null);
+  const [effects, setEffects] = useState<VisualEffect[]>([]);
+  const [screenShake, setScreenShake] = useState(false);
+  const [draggedPos, setDraggedPos] = useState<Position | null>(null);
+
+  const effectIdRef = useRef(0);
+  const lastAiActionTimeRef = useRef(0);
+  const graveyardRef = useRef<DeadPiece[]>([]); // To avoid dependency cycles in interval
+
+  // Sync ref with state
+  useEffect(() => { graveyardRef.current = graveyard; }, [graveyard]);
+
+  const addLog = (msg: string) => setLogs(prev => [msg, ...prev].slice(0, 3));
+
+  const triggerEffect = (row: number, col: number, type: VisualEffect['type'], text?: string) => {
+    const id = effectIdRef.current++;
+    setEffects(prev => [...prev, { id, row, col, type, text }]);
+    setTimeout(() => {
+      setEffects(prev => prev.filter(e => e.id !== id));
+    }, 1000);
+  };
+
+  // --- 게임 시작 프로세스 ---
+  const startGame = (difficulty: Difficulty) => {
+    setSelectedDifficulty(difficulty);
+    setGameStatus('countdown');
+    setCountDown(3);
+    setBoard(initialBoardSetup());
+    setGraveyard([]);
+    setLogs([`난이도: ${difficulty.label}`, '전투 준비!']);
+    setWinner(null);
+  };
+
+  // --- 카운트다운 로직 ---
+  useEffect(() => {
+    if (gameStatus === 'countdown') {
+      if (countDown > 0) {
+        const timer = setTimeout(() => setCountDown(prev => prev - 1), 1000);
+        return () => clearTimeout(timer);
+      } else {
+        setGameStatus('playing');
+        addLog('전투 시작!');
+      }
+    }
+  }, [gameStatus, countDown]);
+
+  // --- 레벨업 로직 ---
+  const processLevelUp = (piece: Piece): { piece: Piece, leveledUp: boolean } => {
+    if (piece.xp >= piece.maxXp && piece.level < 18) {
+      const newPiece = { ...piece };
+      newPiece.level += 1;
+      newPiece.xp -= newPiece.maxXp;
+      newPiece.maxXp = Math.floor(newPiece.maxXp * 1.2);
+      newPiece.maxHp = Math.floor(newPiece.maxHp * 1.15);
+      newPiece.hp = newPiece.maxHp;
+      newPiece.maxMana = Math.floor(newPiece.maxMana * 1.1);
+      newPiece.mana = newPiece.maxMana;
+      newPiece.attack = Math.floor(newPiece.attack * 1.15);
+      newPiece.defense = Math.floor(newPiece.defense * 1.15);
+      return { piece: newPiece, leveledUp: true };
+    }
+    return { piece, leveledUp: false };
+  };
+
+  // --- 실시간 게임 루프 (Main Game Loop) ---
+  useEffect(() => {
+    if (gameStatus !== 'playing') return;
+
+    const tickRate = 50; 
+    const loop = setInterval(() => {
+      const now = Date.now();
+      
+      // 1. 리스폰 로직 (Graveyard 처리)
+      let spawnedUnits: { piece: Piece, r: number, c: number }[] = [];
+      
+      // Update Graveyard timers
+      setGraveyard(prevGraveyard => {
+        const nextGraveyard: DeadPiece[] = [];
+        prevGraveyard.forEach(dead => {
+            const timeLeft = dead.respawnTimeLeft - tickRate;
+            if (timeLeft <= 0) {
+                // 부활 시도 (상태만 저장, 실제 배치는 setBoard에서)
+                // Red: 0열, Blue: 7열
+                const spawnRow = dead.piece.color === 'red' ? 0 : 7;
+                // 빈 자리 찾기 로직은 setBoard 안에서 해야 정확함.
+                // 하지만 여기서는 Graveyard 상태 갱신이 먼저라...
+                // *간소화*: 부활 타이머가 다 되면 'Ready' 상태로 두고 setBoard에서 처리
+                nextGraveyard.push({ ...dead, respawnTimeLeft: 0 }); 
+            } else {
+                nextGraveyard.push({ ...dead, respawnTimeLeft: timeLeft });
+            }
+        });
+        return nextGraveyard;
+      });
+
+      setBoard(prevBoard => {
+        const nextBoard = prevBoard.map(row => row.map(p => p ? { ...p } : null));
+
+        // 1-1. 실제 리스폰 배치
+        // Graveyard ref를 사용하여 최신 상태 확인 (setGraveyard와 동기화 문제 회피를 위해 간단히 처리)
+        // 여기서는 Graveyard State 변경과 Board 변경을 한 틱에 완벽 동기화하기 어려우므로
+        // 별도의 로직으로 Board에 빈자리가 있으면 Graveyard에서 꺼내오는 방식을 사용
         
-        .board-container {
-            width: 100%; max-width: 480px; aspect-ratio: 1/1;
-            display: grid; grid-template-columns: repeat(8, 1fr); grid-template-rows: repeat(8, 1fr);
-            border: 4px solid #334155; background-color: #1e293b;
-            position: relative; transition: all 0.3s ease; margin: 0 auto;
-        }
+        // (위의 setGraveyard는 타이머만 줄임. 실제 부활은 여기서 처리하고 Graveyard에서 제거해야 함)
+        // 하지만 State Updater 안에서 다른 State를 set하면 안됨.
+        // 해결책: Board Loop 안에서 처리하지 않고, 별도 Effect나 Ref를 써야 하지만,
+        // 가장 쉬운 방법: Graveyard의 타이머 처리를 이 Loop 안에서 하지 않고,
+        // 이 Loop는 Board만 관장. Graveyard 관리는 별도 Interval? -> 성능 이슈.
+        // **통합**: Graveyard State를 Ref로 관리하거나,
+        // 그냥 Board 업데이트 시점에 Graveyard State를 참조하여 처리 (클로저 이슈 주의)
+        
+        // *Ref 기반 리스폰 처리*
+        const currentGraveyard = [...graveyardRef.current];
+        let graveyardChanged = false;
+        const remainingGraveyard: DeadPiece[] = [];
 
-        /* Turn Indicator Borders */
-        .board-container.turn-white { border-color: #94a3b8; box-shadow: 0 0 15px rgba(148, 163, 184, 0.5); }
-        .board-container.turn-black { border-color: #ef4444; box-shadow: 0 0 15px rgba(239, 68, 68, 0.4); }
-
-        /* Board Types Overrides */
-        .board-container.ice-type { background-color: #162c35; }
-        .board-container.ice-type .cell { background: rgba(165, 243, 252, 0.08); }
-        .board-container.mud-type { background-color: #2a1b12; }
-        .board-container.mud-type .cell { background: rgba(69, 26, 3, 0.2); }
-
-        .cell {
-            display: flex; justify-content: center; align-items: center;
-            font-size: 1.6rem; cursor: pointer; position: relative;
-        }
-        .cell.white { background-color: rgba(255,255,255,0.05); color: #94a3b8; }
-        .cell.black { background-color: rgba(0,0,0,0.2); color: #64748b; }
-        .cell.selected { background-color: rgba(6, 182, 212, 0.4) !important; }
-
-        /* Fog Visuals */
-        .fog-hidden::after {
-            content: ''; position: absolute; inset: 0; background: #020617; z-index: 20; opacity: 0.98;
-        }
-
-        /* Portal Visuals */
-        .portal-cell { box-shadow: inset 0 0 15px #a855f7; animation: pulse 2s infinite; }
-        .portal-cell::before { content: '🌀'; font-size: 0.8rem; position: absolute; bottom: 2px; left: 2px; }
-
-        /* Interaction Visuals */
-        .valid-move::after { content: ''; width: 12px; height: 12px; background: #22d3ee; border-radius: 50%; opacity: 0.7; box-shadow: 0 0 5px #22d3ee; z-index: 30; }
-        .valid-capture::after { content: ''; position: absolute; inset: 0; border: 3px solid #ef4444; box-shadow: inset 0 0 10px #ef4444; z-index: 30; }
-
-        /* Pieces */
-        .piece { z-index: 15; transition: transform 0.2s; position: relative; width: 100%; height: 100%; display: flex; justify-content: center; align-items: center; }
-        .piece.white-team { color: #f8fafc; text-shadow: 0 0 5px #fff; }
-        .piece.black-team { color: #ef4444; text-shadow: 0 0 5px #7f1d1d; }
-        .piece.neutral-team { color: #fbbf24; text-shadow: 0 0 5px #f59e0b; }
-
-        /* Target Mark */
-        .target-mark {
-            position: absolute; inset: 0; border: 2px dashed #facc15; border-radius: 50%;
-            animation: spin 4s linear infinite; pointer-events: none; z-index: 14;
-        }
-
-        /* Skill Badges */
-        .skill-badge {
-            position: absolute; top: -6px; right: -6px; width: 16px; height: 16px;
-            font-size: 9px; border-radius: 50%; border: 1.5px solid #fff;
-            display: flex; justify-content: center; align-items: center; color: white;
-            z-index: 16; box-shadow: 0 0 4px rgba(0,0,0,0.8);
-            cursor: help;
-        }
-        .skill-bomb { background: #ef4444; } 
-        .skill-shield { background: #3b82f6; } 
-        .skill-scout, .skill-ghost { background: #22c55e; } 
-        .skill-freeze, .skill-nuke { background: #a855f7; }
-        .skill-rage { background: #f97316; }
-
-        .frozen-effect { filter: grayscale(100%) brightness(1.5) drop-shadow(0 0 5px #38bdf8); }
-
-        /* HUD & Screens */
-        .screen { display: none; height: 100vh; flex-direction: column; align-items: center; justify-content: center; }
-        .screen.active { display: flex; }
-        .hud-panel { background: rgba(15, 23, 42, 0.95); border: 1px solid #334155; padding: 6px 10px; border-radius: 6px; }
-
-        @keyframes pulse { 0%, 100% { opacity: 0.5; } 50% { opacity: 1; } }
-        @keyframes spin { 100% { transform: rotate(360deg); } }
-    </style>
-</head>
-<body>
-
-    <!-- LOBBY -->
-    <div id="lobby-screen" class="screen active bg-slate-900">
-        <h1 class="text-5xl font-bold mb-2 neon-text text-cyan-400 text-center">PUZZLE COBWEB</h1>
-        <p class="text-slate-500 mb-8 text-xs tracking-[0.2em]">v0.3.2 // TREASURE BUG FIX</p>
-        <button onclick="startGame()" class="bg-slate-800 border border-cyan-500 text-cyan-400 py-3 px-8 rounded hover:bg-slate-700 font-bold neon-border">
-            START PUZZLE RUN
-        </button>
-        <div class="mt-4 text-[10px] text-slate-600 grid grid-cols-2 gap-x-8 gap-y-1 text-left">
-            <span>• 12 Roguelike Stages</span> <span>• Passive Skills Only</span>
-            <span>• Normalized Difficulty</span> <span>• Treasure Logic Fixed</span>
-        </div>
-    </div>
-
-    <!-- GAMEPLAY -->
-    <div id="game-screen" class="screen relative">
-        <!-- Top HUD -->
-        <div class="absolute top-2 w-full px-2 flex justify-between gap-2 max-w-lg z-40">
-            <div class="hud-panel flex flex-col items-center w-16">
-                <span class="text-[9px] text-slate-400">RUN</span>
-                <span class="text-lg font-bold text-amber-400"><span id="run-current">1</span><span class="text-[10px] text-slate-600">/12</span></span>
-            </div>
-            <div class="hud-panel flex-grow flex flex-col items-center justify-center">
-                <span class="text-[9px] text-slate-400 mb-0.5">OBJECTIVE</span>
-                <span id="goal-text" class="text-xs font-bold text-cyan-300 text-center">...</span>
-                <span id="goal-sub" class="text-[10px] text-slate-500 mt-0.5 hidden"></span>
-            </div>
-            <div class="hud-panel flex flex-col items-center w-16">
-                <span class="text-[9px] text-slate-400">LIFE</span>
-                <span id="lives-text" class="text-lg text-red-400 font-bold">♥♥♥</span>
-            </div>
-        </div>
-
-        <!-- Board Info -->
-        <div class="w-full max-w-lg flex justify-between items-end px-2 mb-1">
-            <div class="flex items-center gap-2">
-                <span id="board-badge" class="px-2 py-0.5 bg-slate-700 text-[10px] text-white rounded border border-slate-500">CLASSIC</span>
-            </div>
-            <div class="text-right">
-                <span class="text-[10px] text-slate-400">TURNS</span>
-                <span class="text-white font-bold text-lg"><span id="turn-now">0</span><span class="text-sm text-slate-500">/</span><span id="turn-max">0</span></span>
-            </div>
-        </div>
-
-        <!-- The Board -->
-        <div id="board" class="board-container rounded shadow-2xl"></div>
-
-        <!-- Bottom Status -->
-        <div class="mt-4 w-full max-w-lg px-4 text-center">
-            <div id="message-box" class="text-sm text-slate-300 min-h-[1.5rem] mb-2 font-bold transition-all duration-200">Initialize...</div>
-            <button onclick="goToLobby()" class="text-[10px] text-slate-600 hover:text-red-400 underline">ABORT RUN</button>
-        </div>
-
-        <!-- AI Overlay -->
-        <div id="ai-overlay" class="absolute inset-0 bg-black/10 z-50 hidden flex items-center justify-center pointer-events-none">
-            <div class="bg-slate-900/90 border border-cyan-500 px-4 py-2 text-cyan-400 text-sm rounded animate-pulse shadow-lg">
-                <i class="fas fa-brain mr-2"></i>AI THINKING...
-            </div>
-        </div>
-    </div>
-
-    <!-- RESULT MODAL -->
-    <div id="modal" class="fixed inset-0 bg-black/90 z-50 hidden flex items-center justify-center p-4">
-        <div class="bg-slate-800 border border-slate-600 rounded-lg p-6 max-w-sm w-full text-center shadow-2xl">
-            <h2 id="modal-title" class="text-2xl font-bold mb-2 text-white">RESULT</h2>
-            <div id="modal-reason" class="text-sm text-slate-400 mb-6">Details</div>
-            <button id="modal-btn" onclick="nextRun()" class="w-full bg-cyan-600 hover:bg-cyan-500 text-white font-bold py-3 rounded">CONTINUE</button>
-        </div>
-    </div>
-
-    <script>
-        // === DATA: PASSIVE SKILLS ===
-        const SKILLS = [
-            { id: 'bomb', name: 'Bomb', icon: '💣', desc: '사망 시 주변 3x3 폭발' },
-            { id: 'shield', name: 'Shield', icon: '🛡️', desc: '1회 방어 (데미지 무효)' },
-            { id: 'scout', name: 'Scout', icon: '👟', desc: '이동 거리 +1' },
-            { id: 'rage', name: 'Rage', icon: '💢', desc: '처치 시 1회 추가 이동' },
-            { id: 'ghost', name: 'Ghost', icon: '👻', desc: '유닛 통과 가능' },
-            { id: 'freeze', name: 'Freeze', icon: '❄️', desc: '주변 적 이동 불가' },
-            { id: 'sniper', name: 'Sniper', icon: '🔭', desc: '사거리 무제한' },
-            { id: 'push', name: 'Push', icon: '✋', desc: '공격 시 적을 밀어냄' },
-            { id: 'king_slayer', name: 'Slayer', icon: '👑', desc: '킹 상대로 확정 킬' },
-            { id: 'immortal', name: 'God', icon: '🌟', desc: '3턴간 무적' },
-            { id: 'heavy', name: 'Heavy', icon: '🧱', desc: '밀려나지 않음' },
-            { id: 'burn', name: 'Burn', icon: '🔥', desc: '공격 시 화상 부여' },
-            { id: 'nuke', name: 'Nuke', icon: '☢️', desc: '사망 시 맵 전체 랜덤 1킬' }
-        ];
-
-        // === CONSTANTS ===
-        const PIECES = {
-            white: { k: '♔', q: '♕', r: '♖', b: '♗', n: '♘', p: '♙' },
-            black: { k: '♚', q: '♛', r: '♜', b: '♝', n: '♞', p: '♟' },
-            neutral: { treasure: '💎' }
-        };
-        const PIECE_VALS = { k: 1000, q: 90, r: 50, b: 30, n: 30, p: 10, treasure: 50 };
-
-        // === STATE ===
-        let state = {
-            run: 1,
-            lives: 3,
-            board: [],
-            portals: [], 
-            fog: [],
-            turn: 'white',
-            turnCount: 0,
-            maxTurns: 10,
-            boardType: 'classic',
-            goal: {},
-            selected: null,
-            validMoves: [],
-            eliminatedCount: 0,
-            isGameOver: false,
-            extraTurn: false 
-        };
-
-        // === INIT ===
-        function startGame() {
-            state.run = 1; 
-            state.lives = 3;
-            startRun();
-            document.querySelectorAll('.screen').forEach(e => e.classList.remove('active'));
-            document.getElementById('game-screen').classList.add('active');
-        }
-
-        function goToLobby() {
-            document.querySelectorAll('.screen').forEach(e => e.classList.remove('active'));
-            document.getElementById('lobby-screen').classList.add('active');
-        }
-
-        function startRun() {
-            // Difficulty Normalization (Linear scaling)
-            const diff = 0.1 + (state.run - 1) * 0.1; 
-            
-            // Board Type Logic
-            const types = ['classic', 'ice', 'mud', 'portal', 'fog'];
-            if (state.run <= 2) state.boardType = 'classic';
-            else if (state.run <= 4) state.boardType = Math.random() < 0.5 ? 'classic' : types[Math.floor(Math.random() * 3)];
-            else state.boardType = types[Math.floor(Math.random() * types.length)];
-            
-            state.maxTurns = 10; 
-
-            createBoard(diff);
-            generateGoal();
-            assignSkills(diff);
-
-            // Reset
-            state.turn = 'white';
-            state.turnCount = 1;
-            state.eliminatedCount = 0;
-            state.isGameOver = false;
-            state.selected = null;
-            state.validMoves = [];
-            state.extraTurn = false;
-            
-            updateFog();
-            render();
-            document.getElementById('modal').classList.add('hidden');
-        }
-
-        function createBoard(diff) {
-            state.board = Array(8).fill(null).map(() => Array(8).fill(null));
-            state.portals = [];
-            
-            placePiece(7, 4, 'k', 'white');
-            placePiece(0, 4, 'k', 'black');
-
-            const pool = ['q','r','r','b','b','n','n','p','p','p','p'];
-            
-            // Player pieces (Always 8)
-            for(let i=0; i<8; i++) placeRandom('white', [6,7], pool);
-            
-            // Enemy Count (Smooth scaling: 8 -> 14)
-            const enemyCount = Math.min(14, 8 + Math.floor((state.run - 1) * 0.6));
-            for(let i=0; i<enemyCount; i++) placeRandom('black', [0,1,2], pool);
-
-            if (state.boardType === 'portal') {
-                for(let i=0; i<4; i++) {
-                    let r, c;
-                    do { r=Math.floor(Math.random()*6)+1; c=Math.floor(Math.random()*8); } while(state.board[r][c]);
-                    state.portals.push({r,c, link: (i%2===0 ? i+1 : i-1)});
-                }
-            }
-        }
-
-        function placeRandom(color, rows, pool) {
-            let placed = false, tries = 0;
-            while(!placed && tries++ < 50) {
-                let r = rows[Math.floor(Math.random()*rows.length)];
-                let c = Math.floor(Math.random()*8);
-                if(!state.board[r][c]) {
-                    const type = pool[Math.floor(Math.random()*pool.length)];
-                    placePiece(r, c, type, color);
-                    placed = true;
-                }
-            }
-        }
-
-        function placePiece(r, c, type, color) {
-            state.board[r][c] = {
-                type, color, 
-                id: `${color}_${type}_${Math.random().toString(36).substr(2,5)}`,
-                skill: null
-            };
-        }
-
-        function generateGoal() {
-            const goals = ['king_slayer', 'bounty_hunter', 'survive', 'blitz', 'reaper', 'escort', 'treasure', 'boss_raid'];
-            let validGoals = [...goals];
-            
-            const blacks = getAllPieces('black'); 
-            const whites = getAllPieces('white');
-            let type = validGoals[Math.floor(Math.random() * validGoals.length)];
-            
-            state.goal = { type };
-            // Base turn limit
-            state.maxTurns = 10 + Math.floor(Math.random() * 4); 
-            if (state.boardType === 'mud') state.maxTurns += 3;
-
-            if (type === 'king_slayer') {
-                state.goal.desc = "적 킹(King) 처치";
-            }
-            else if (type === 'bounty_hunter') {
-                const targets = blacks.filter(p => ['q','r','b'].includes(p.type));
-                const target = targets.length ? targets[0] : blacks[0];
-                state.goal.targetId = target.id;
-                state.goal.desc = `현상수배: ${target.type.toUpperCase()}`;
-            }
-            else if (type === 'survive') {
-                const turns = 6 + Math.floor(Math.random() * 3); 
-                state.maxTurns = turns;
-                state.goal.desc = `${turns}턴 생존 (버티기)`;
-            }
-            else if (type === 'blitz') {
-                state.maxTurns = 15 + Math.floor(Math.random() * 6);
-                state.goal.desc = "아군 폰을 끝까지 이동";
-                if (!whites.some(p=>p.type==='p')) { state.goal = { type:'reaper', count: 3, desc:"적 3기 처치" }; }
-            }
-            else if (type === 'reaper') {
-                // Min 3 kills to avoid accidental quick win
-                const count = Math.max(3, 3 + Math.floor((state.run-1)/3));
-                state.goal.count = count;
-                state.maxTurns = 12 + count;
-                state.goal.desc = `적 기물 ${count}기 처치`;
-            }
-            else if (type === 'escort') {
-                const vips = whites.filter(p => p.type !== 'k');
-                if (vips.length === 0) { 
-                    state.goal = { type:'survive', turns:5, desc:"5턴 생존" }; 
-                    state.maxTurns = 5; 
-                } else {
-                    const vip = vips[Math.floor(Math.random()*vips.length)];
-                    state.goal.vipId = vip.id;
-                    state.maxTurns = 8 + Math.floor(Math.random() * 4);
-                    state.goal.desc = `VIP 호위 (${state.maxTurns}턴 버티기)`;
-                }
-            }
-            else if (type === 'treasure') {
-                let r, c;
-                do { r=Math.floor(Math.random()*3); c=Math.floor(Math.random()*8); } while(state.board[r][c]);
-                state.board[r][c] = { type: 'treasure', color: 'neutral', id: 'treasure_chest' };
-                state.goal.targetId = 'treasure_chest';
-                state.goal.desc = "보물상자 획득 (백색 기물로 이동)";
-            }
-            else if (type === 'boss_raid') {
-                const boss = blacks[Math.floor(Math.random()*blacks.length)];
-                state.goal.bossId = boss.id;
-                state.goal.desc = `BOSS(${boss.type.toUpperCase()}) 처치`;
-                boss.skill = 'immortal';
-            }
-        }
-
-        function assignSkills(diff) {
-            const playerSkillCount = 3 + Math.floor((state.run - 1) / 4);
-            const enemySkillChance = 0.1 + ((state.run - 1) * 0.05);
-
-            // Player Skills
-            const whites = getAllPieces('white').filter(p=>p.type!=='k');
-            whites.sort(() => 0.5 - Math.random());
-            for(let i=0; i<Math.min(playerSkillCount, whites.length); i++) {
-                const s = SKILLS[Math.floor(Math.random() * SKILLS.length)];
-                if (s.id !== 'immortal') state.board[whites[i].r][whites[i].c].skill = s.id;
-            }
-
-            // Enemy Skills
-            const blacks = getAllPieces('black').filter(p=>p.type!=='k');
-            for (let p of blacks) {
-                if (Math.random() < enemySkillChance) {
-                    const s = SKILLS[Math.floor(Math.random() * SKILLS.length)];
-                    state.board[p.r][p.c].skill = s.id;
-                }
-            }
-        }
-
-        // === LOGIC ===
-        function getAllPieces(color) {
-            let list = [];
-            for(let r=0; r<8; r++) for(let c=0; c<8; c++) 
-                if(state.board[r][c] && state.board[r][c].color === color) list.push({...state.board[r][c], r, c});
-            return list;
-        }
-
-        function updateFog() {
-            if (state.boardType !== 'fog') return;
-            state.fog = Array(8).fill(null).map(()=>Array(8).fill(false));
-            getAllPieces('white').forEach(p => {
-                for(let dr=-1; dr<=1; dr++) for(let dc=-1; dc<=1; dc++) {
-                    const nr=p.r+dr, nc=p.c+dc;
-                    if(nr>=0 && nr<8 && nc>=0 && nc<8) state.fog[nr][nc] = true;
-                }
-            });
-        }
-
-        function isFrozen(r, c, myColor) {
-            const rInt = parseInt(r);
-            const cInt = parseInt(c);
-            
-            for(let dr=-1; dr<=1; dr++) for(let dc=-1; dc<=1; dc++) {
-                const nr=rInt+dr, nc=cInt+dc;
-                if(nr>=0 && nr<8 && nc>=0 && nc<8) {
-                    const p = state.board[nr][nc];
-                    if(p && p.color !== myColor && p.skill === 'freeze') return true;
-                }
-            }
-            return false;
-        }
-
-        function checkClick(r, c) {
-            if (state.isGameOver || state.turn !== 'white') return;
-            const piece = state.board[r][c];
-            
-            if (state.selected && state.validMoves.some(m => m.r===r && m.c===c)) {
-                movePiece(state.selected, {r,c});
-                return;
-            }
-
-            if (piece && piece.color === 'white') {
-                if (isFrozen(r, c, 'white')) {
-                    showMessage("❄️ FROZEN! 이동 불가", "red");
-                    return;
-                }
-                
-                if (piece.skill) {
-                    const s = SKILLS.find(x=>x.id===piece.skill);
-                    showMessage(`[${s.name}] ${s.desc}`, "cyan");
-                } else {
-                    showMessage("기물 선택됨");
-                }
-
-                state.selected = {r,c};
-                state.validMoves = getMoves(r,c, piece);
-                render();
-            } 
-            else if (piece && piece.color === 'black') {
-                 if (piece.skill) {
-                    const s = SKILLS.find(x=>x.id===piece.skill);
-                    showMessage(`적군 [${s.name}] ${s.desc}`, "red");
-                } else {
-                    showMessage("적군 기물 (스킬 없음)", "slate");
-                }
-                state.selected = null;
-                state.validMoves = [];
-                render();
-            }
-            else {
-                state.selected = null;
-                state.validMoves = [];
-                render();
-            }
-        }
-
-        function getMoves(r, c, piece) {
-            let moves = [];
-            const rInt = parseInt(r);
-            const cInt = parseInt(c);
-            
-            const directions = {
-                straight: [[-1,0],[1,0],[0,-1],[0,1]],
-                diag: [[-1,-1],[-1,1],[1,-1],[1,1]],
-                knight: [[-2,-1],[-2,1],[-1,-2],[-1,2],[1,-2],[1,2],[2,-1],[2,1]]
-            };
-
-            const isMud = state.boardType === 'mud';
-            const isScout = piece.skill === 'scout';
-            const isSniper = piece.skill === 'sniper';
-            const isGhost = piece.skill === 'ghost';
-
-            const canStep = (nr, nc) => {
-                if(nr<0||nr>7||nc<0||nc>7) return 'OB';
-                const t = state.board[nr][nc];
-                if(!t) return 'EMPTY';
-                if(t.color !== piece.color) return 'CAP';
-                return 'BLK';
-            }
-
-            if (piece.type === 'p') {
-                const d = piece.color==='white'?-1:1;
-                const maxStep = isScout ? 2 : 1;
-                for(let i=1; i<=maxStep; i++) {
-                     if(canStep(rInt+d*i, cInt)==='EMPTY') {
-                         moves.push({r:rInt+d*i, c:cInt});
-                         if (!isMud && i===1 && rInt===(piece.color==='white'?6:1) && canStep(rInt+d*2, cInt)==='EMPTY') {
-                             moves.push({r:rInt+d*2, c:cInt});
-                         }
-                     } else break;
-                }
-                [[d,-1],[d,1]].forEach(([dr,dc]) => { if(canStep(rInt+dr,cInt+dc)==='CAP') moves.push({r:rInt+dr,c:cInt+dc}); });
-            } 
-            else if (piece.type === 'n') {
-                directions.knight.forEach(([dr,dc]) => {
-                    const res = canStep(rInt+dr, cInt+dc);
-                    if(res==='EMPTY'||res==='CAP') moves.push({r:rInt+dr, c:cInt+dc});
-                });
-            }
-            else {
-                const defaultRange = (piece.type === 'k' || isMud) ? 1 : 8;
-                let range = defaultRange;
-                if (isScout) range += 1;
-                if (isSniper) range = 8;
-
-                let dirs = [];
-                if(['r','q','k'].includes(piece.type)) dirs.push(...directions.straight);
-                if(['b','q','k'].includes(piece.type)) dirs.push(...directions.diag);
-
-                dirs.forEach(([dr,dc]) => {
-                    let nr=rInt, nc=cInt, dist=0;
-                    while(dist < range) {
-                        nr+=dr; nc+=dc; dist++;
-                        const res = canStep(nr, nc);
-                        if (res === 'OB') break;
-                        if (res === 'BLK') { if (!isGhost) break; }
-                        if (res === 'EMPTY' || res === 'CAP') { moves.push({r:nr, c:nc}); }
-                        if (res === 'CAP') break;
-                    }
-                });
-            }
-            return moves;
-        }
-
-        function movePiece(from, to) {
-            const p = state.board[from.r][from.c];
-            let target = state.board[to.r][to.c];
-            let actualCapture = false;
-
-            state.board[to.r][to.c] = p;
-            state.board[from.r][from.c] = null;
-
-            if (state.boardType === 'portal') {
-                const portal = state.portals.find(x => x.r===to.r && x.c===to.c);
-                if (portal) {
-                    const dest = state.portals[portal.link];
-                    if (!state.board[dest.r][dest.c]) {
-                        state.board[dest.r][dest.c] = p;
-                        state.board[to.r][to.c] = null;
-                        to = {r: dest.r, c: dest.c};
-                        showMessage("🌀 Portal Warp!", "purple");
-                    }
-                }
-            }
-
-            if (p.skill === 'push' && target) {
-                 if (target.skill === 'heavy') {
-                      showMessage("🧱 Heavy (No Push)", "blue");
-                      actualCapture = true; 
-                 } else {
-                     const dr = Math.sign(to.r - from.r);
-                     const dc = Math.sign(to.c - from.c);
-                     const pr = to.r + dr, pc = to.c + dc;
-                     
-                     if (pr>=0 && pr<8 && pc>=0 && pc<8 && !state.board[pr][pc]) {
-                         state.board[pr][pc] = target;
-                         state.board[to.r][to.c] = p; 
-                         showMessage("✋ Push!", "red");
-                         target = null; 
-                     } else {
-                         showMessage("✋ Push & Crush!", "red");
-                         actualCapture = true;
+        currentGraveyard.forEach(dead => {
+             if (dead.respawnTimeLeft <= 0) {
+                 const spawnRow = dead.piece.color === 'red' ? 0 : 7;
+                 // 빈자리 찾기
+                 let spawned = false;
+                 for (let c = 0; c < 8; c++) {
+                     if (!nextBoard[spawnRow][c]) {
+                         nextBoard[spawnRow][c] = { 
+                             ...dead.piece, 
+                             hp: dead.piece.maxHp, 
+                             mana: dead.piece.maxMana, 
+                             currentCooldown: 50 // 부활 후 잠깐 대기
+                         };
+                         triggerEffect(spawnRow, c, 'buff', '부활!');
+                         spawned = true;
+                         graveyardChanged = true;
+                         break;
                      }
                  }
-            } else if (target) {
-                actualCapture = true;
-            }
+                 if (!spawned) remainingGraveyard.push(dead); // 자리가 없으면 대기
+             } else {
+                 remainingGraveyard.push(dead);
+             }
+        });
 
-            if (target && actualCapture) {
-                if (target.skill === 'shield') { 
-                    showMessage("🛡️ Shield Block!", "blue"); 
-                    state.board[to.r][to.c] = target; 
-                    target.skill=null; 
-                    state.board[from.r][from.c] = p; 
-                    endTurnLogic();
-                    return; 
-                }
-
-                if (target.skill === 'bomb') { showMessage("💣 Bomb Triggered!", "red"); clearArea(to.r, to.c); }
-                if (target.skill === 'nuke') { showMessage("☢️ NUKE!", "purple"); triggerNuke(target.color); }
-                
-                state.eliminatedCount++;
-                
-                if (p.skill === 'rage') {
-                    state.extraTurn = true;
-                    showMessage("💢 Rage! 추가 턴!", "red");
-                }
-            }
-
-            state.selected = null;
-            state.validMoves = [];
-            
-            if (checkWin(p, target, to)) return;
-            if (checkDefeatImmediately()) return;
-
-            if (state.extraTurn) {
-                state.extraTurn = false;
-                if (state.turn === 'black') setTimeout(aiMove, 600);
-                else render();
-            } else {
-                endTurnLogic();
-            }
+        if (graveyardChanged) {
+            // This is a side effect inside setState, typically bad practice but works for sync in interval
+            // Better to use a useEffect to sync back to state, but let's try direct set for instant feedback
+            // setGraveyard(remainingGraveyard); // This might cause render loop or batching issues.
+            // Let's defer graveyard update to outside.
+            // *Correction*: We cannot update graveyard state inside setBoard. 
+            // We will just update board here. The graveyard timer update logic above handles the countdown.
+            // We need a way to tell the graveyard "hey, this unit respawned, remove it".
         }
 
-        function endTurnLogic() {
-            state.turn = state.turn==='white'?'black':'white';
-            if (state.turn === 'black') {
-                document.getElementById('ai-overlay').classList.remove('hidden');
-                setTimeout(aiMove, 600);
-            } else {
-                document.getElementById('ai-overlay').classList.add('hidden');
-                state.turnCount++;
-                updateFog();
-                checkTurnDefeat();
-                render();
-            }
-        }
-
-        function clearArea(r, c) {
-            for(let dr=-1;dr<=1;dr++) for(let dc=-1;dc<=1;dc++) {
-                const nr=r+dr, nc=c+dc;
-                if(nr>=0 && nr<8 && nc>=0 && nc<8 && state.board[nr][nc]) {
-                     if(state.board[nr][nc].type !== 'k') state.board[nr][nc] = null;
+        // 2. 쿨타임 감소
+        for(let r=0; r<8; r++) {
+            for(let c=0; c<8; c++) {
+                const p = nextBoard[r][c];
+                if (p && p.currentCooldown > 0) {
+                    p.currentCooldown = Math.max(0, p.currentCooldown - p.speed);
                 }
             }
         }
 
-        function triggerNuke(deadColor) {
-            const targetColor = deadColor === 'white' ? 'black' : 'white';
-            let targets = [];
-            for(let r=0;r<8;r++) for(let c=0;c<8;c++) {
-                if(state.board[r][c] && state.board[r][c].color === targetColor && state.board[r][c].type !== 'k') {
-                    targets.push({r,c});
+        // 3. AI Logic (Difficulty 적용)
+        if (now - lastAiActionTimeRef.current > selectedDifficulty.aiDelay) { 
+            const aiUnits: {pos: Position, piece: Piece}[] = [];
+            nextBoard.forEach((row, r) => row.forEach((p, c) => {
+                if (p && p.color === 'red' && p.currentCooldown <= 0) {
+                    aiUnits.push({ pos: { row: r, col: c }, piece: p });
                 }
-            }
-            if(targets.length > 0) {
-                const t = targets[Math.floor(Math.random()*targets.length)];
-                state.board[t.r][t.c] = null;
+            }));
+
+            if (aiUnits.length > 0) {
+                 const selectedAI = aiUnits[Math.floor(Math.random() * aiUnits.length)];
+                 const { pos, piece } = selectedAI;
+                 
+                 let acted = false;
+                 // 스킬
+                 if (piece.skills.length > 0 && Math.random() < 0.3) {
+                     const skill = piece.skills[Math.floor(Math.random() * piece.skills.length)];
+                     if (piece.mana >= skill.manaCost) {
+                         const skillTargets = getSkillTargets(nextBoard, pos, skill);
+                         const enemies = skillTargets.filter(t => nextBoard[t.row][t.col]?.color === 'blue');
+                         if (enemies.length > 0) {
+                             const targetPos = enemies[Math.floor(Math.random() * enemies.length)];
+                             executeActionOnBoard(nextBoard, pos, targetPos, skill);
+                             acted = true;
+                         }
+                     }
+                 }
+
+                 // 이동/공격
+                 if (!acted) {
+                     const moves = getMoves(nextBoard, pos);
+                     const enemies = moves.filter(t => nextBoard[t.row][t.col]?.color === 'blue');
+                     
+                     if (enemies.length > 0) {
+                         const targetPos = enemies[0];
+                         executeActionOnBoard(nextBoard, pos, targetPos, null);
+                         acted = true;
+                     } else {
+                         const validMoves = moves.filter(t => !nextBoard[t.row][t.col]);
+                         if (validMoves.length > 0) {
+                             validMoves.sort((a, b) => b.row - a.row);
+                             if (Math.random() < 0.5) {
+                                executeActionOnBoard(nextBoard, pos, validMoves[0], null);
+                                acted = true;
+                             }
+                         }
+                     }
+                 }
+
+                 if (acted) lastAiActionTimeRef.current = now;
             }
         }
 
-        function aiMove() {
-            const blacks = getAllPieces('black');
-            if(!blacks.length) { endTurnLogic(); return; }
+        return nextBoard;
+      });
 
-            let bestMove = null;
-            let maxScore = -99999;
+      // Graveyard removal sync (Board update logic above couldn't update graveyard state directly)
+      // Instead, we check the BOARD. If a unit that was in graveyard is now on board (impossible to track easily by ID without map)
+      // Alternative: Just use a ref for the graveyard "spawn ready" logic completely?
+      // Let's fix the Graveyard Logic properly:
+      // We will perform the 'spawn' logic via setBoard, and then clean up Graveyard in a separate setGraveyard call inside the interval
+      // by checking if the spot is taken? No.
+      // Re-approach:
+      // The interval updates Graveyard State -> Board State sequentially.
+      
+      setGraveyard(prev => {
+          // 1. Decrease Timers
+          const ticked = prev.map(g => ({ ...g, respawnTimeLeft: Math.max(0, g.respawnTimeLeft - tickRate) }));
+          
+          // 2. Try Spawn
+          const remaining: DeadPiece[] = [];
+          
+          // We need access to current board to check for empty spots.
+          // Since we are inside setInterval closure, 'board' state might be stale unless we use setBoard callback.
+          // But we can't combine them easily.
+          // TRICK: Use the mutable `boardRef` pattern? No, we have functional updates.
+          
+          // Let's just decrease timers here. The actual spawning will be done by a separate Effect monitoring `graveyard`.
+          return ticked;
+      });
 
-            for (let p of blacks) {
-                if (isFrozen(p.r, p.c, 'black')) continue;
-                const moves = getMoves(p.r, p.c, p);
-                for (let m of moves) {
-                    let score = 0;
-                    const target = state.board[m.r][m.c];
-                    
-                    if (target) {
-                        const val = PIECE_VALS[target.type] || 5;
-                        score += val * 10;
-                        if (target.type === 'k') score += 10000; 
-                    }
-                    score += m.r * 2; 
-                    score += Math.random() * 5;
+    }, tickRate);
 
-                    if (score > maxScore) {
-                        maxScore = score;
-                        bestMove = { from: p, to: m };
-                    }
+    return () => clearInterval(loop);
+  }, [gameStatus, selectedDifficulty]);
+
+  // --- 리스폰 전용 Effect (Graveyard 모니터링) ---
+  useEffect(() => {
+      if (gameStatus !== 'playing') return;
+      
+      const readyToSpawn = graveyard.filter(g => g.respawnTimeLeft <= 0);
+      if (readyToSpawn.length === 0) return;
+
+      setBoard(prevBoard => {
+          const nextBoard = prevBoard.map(row => [...row]);
+          const spawnedIds: string[] = [];
+
+          readyToSpawn.forEach(dead => {
+              const spawnRow = dead.piece.color === 'red' ? 0 : 7;
+              for (let c = 0; c < 8; c++) {
+                  if (!nextBoard[spawnRow][c]) {
+                      nextBoard[spawnRow][c] = { 
+                          ...dead.piece, 
+                          hp: dead.piece.maxHp, 
+                          mana: dead.piece.maxMana, 
+                          currentCooldown: 50
+                      };
+                      triggerEffect(spawnRow, c, 'buff', '부활!');
+                      spawnedIds.push(dead.piece.id);
+                      break;
+                  }
+              }
+          });
+
+          // 부활 성공한 유닛만 묘지에서 제거
+          if (spawnedIds.length > 0) {
+              // We need to update graveyard state, but we are inside setBoard.
+              // Use setTimeout to break render cycle or just handle it in next effect?
+              // Let's use a ref to signal cleanup needed?
+              // Or just call setGraveyard here (it triggers re-render but valid in effect)
+              // But we are inside setBoard callback... No, we are in useEffect.
+              // So we can call setGraveyard.
+              setTimeout(() => {
+                  setGraveyard(curr => curr.filter(g => !spawnedIds.includes(g.piece.id)));
+              }, 0);
+          }
+          return nextBoard;
+      });
+  }, [graveyard, gameStatus]);
+
+
+  // --- Action Logic ---
+  const executeActionOnBoard = (currentBoard: (Piece | null)[][], from: Position, to: Position, usedSkill: Skill | null) => {
+      const actor = currentBoard[from.row][from.col];
+      const target = currentBoard[to.row][to.col];
+      if (!actor) return;
+
+      actor.currentCooldown = actor.maxCooldown;
+
+      if (usedSkill) {
+          actor.mana -= usedSkill.manaCost;
+          if (target) {
+             const dmg = Math.floor(actor.attack * usedSkill.damageRatio);
+             const actualDmg = Math.max(10, dmg - target.defense);
+             target.hp -= actualDmg;
+             triggerEffect(to.row, to.col, 'explosion', `-${actualDmg}`);
+             actor.xp += 50;
+          }
+      } else {
+          if (target) {
+              const dmg = Math.max(10, actor.attack - target.defense);
+              target.hp -= dmg;
+              actor.mana = Math.min(actor.maxMana, actor.mana + 15);
+              triggerEffect(to.row, to.col, 'hit', `-${dmg}`);
+              actor.xp += 30;
+          } else {
+              currentBoard[to.row][to.col] = actor;
+              currentBoard[from.row][from.col] = null;
+          }
+      }
+
+      const piecesToCheck = [actor, target].filter(p => p !== null) as Piece[];
+      piecesToCheck.forEach(p => {
+          // 사망 체크
+          if (p === target && p.hp <= 0) {
+              if (p.type === 'k') {
+                 // 넥서스 파괴 시 게임 종료
+                 setWinner(actor.color === 'blue' ? 'VICTORY' : 'DEFEAT');
+                 setGameStatus('gameover');
+              } else {
+                 // 일반 기물 묘지로 이동 (setGraveyard는 Loop 밖에서 처리해야 함)
+                 // Board Logic 안이므로, State 업데이트를 비동기로 예약
+                 // 단, 이 함수는 setBoard 내부에서 호출되므로 여기서 직접 setGraveyard 호출 시 문제될 수 있음.
+                 // 하지만 React 18 배칭으로 인해 보통 괜찮음.
+                 // 안전하게 처리: 
+                 const deadUnit = { ...p };
+                 setTimeout(() => {
+                     setGraveyard(prev => [...prev, { piece: deadUnit, respawnTimeLeft: 12000 }]); // 12초
+                 }, 0);
+              }
+              
+              currentBoard[to.row][to.col] = null;
+              if (!usedSkill && target && p === target) {
+                  currentBoard[to.row][to.col] = actor;
+                  currentBoard[from.row][from.col] = null;
+                  actor.xp += 100;
+              } else {
+                  actor.xp += 80;
+              }
+          }
+
+          const lv = processLevelUp(p);
+          if (lv.leveledUp) {
+              Object.assign(p, lv.piece);
+              const pPos = (p === actor && (!target || target.hp > 0)) ? from : to;
+              if (p.hp > 0) { // 살아있을 때만 레벨업 이펙트
+                triggerEffect(p === actor ? from.row : to.row, p === actor ? from.col : to.col, 'levelUp', 'Level Up!');
+              }
+          }
+      });
+  };
+
+  // --- 기존 Helper Functions ---
+  const getMoves = (boardState: (Piece | null)[][], pos: Position): Position[] => {
+    const piece = boardState[pos.row][pos.col];
+    if (!piece) return [];
+    const moves: Position[] = [];
+    const { type, color } = piece;
+    const check = (r: number, c: number) => {
+      if (!isValidPos(r, c)) return false;
+      const target = boardState[r][c];
+      if (target && target.color === color) return false;
+      moves.push({ row: r, col: c });
+      return !target;
+    };
+    const directions = {
+      straight: [[-1, 0], [1, 0], [0, -1], [0, 1]],
+      diagonal: [[-1, -1], [-1, 1], [1, -1], [1, 1]],
+      knight: [[-2, -1], [-2, 1], [-1, -2], [-1, 2], [1, -2], [1, 2], [2, -1], [2, 1]],
+    };
+    if (type === 'n') directions.knight.forEach(([dr, dc]) => check(pos.row + dr, pos.col + dc));
+    else if (type === 'r') directions.straight.forEach(([dr, dc]) => { let r = pos.row + dr, c = pos.col + dc; while (check(r, c)) { r += dr; c += dc; } });
+    else if (type === 'b') directions.diagonal.forEach(([dr, dc]) => { let r = pos.row + dr, c = pos.col + dc; while (check(r, c)) { r += dr; c += dc; } });
+    else if (type === 'q') [...directions.straight, ...directions.diagonal].forEach(([dr, dc]) => { let r = pos.row + dr, c = pos.col + dc; while (check(r, c)) { r += dr; c += dc; } });
+    else if (type === 'k') [...directions.straight, ...directions.diagonal].forEach(([dr, dc]) => check(pos.row + dr, pos.col + dc));
+    else if (type === 'p') {
+      const dir = color === 'blue' ? -1 : 1;
+      if (isValidPos(pos.row + dir, pos.col) && !boardState[pos.row + dir][pos.col]) {
+        moves.push({ row: pos.row + dir, col: pos.col });
+      }
+      [[dir, -1], [dir, 1]].forEach(([dr, dc]) => {
+        const r = pos.row + dr, c = pos.col + dc;
+        if (isValidPos(r, c)) {
+          const target = boardState[r][c];
+          if (target && target.color !== color) moves.push({ row: r, col: c });
+        }
+      });
+    }
+    return moves;
+  };
+
+  const getSkillTargets = (boardState: (Piece | null)[][], pos: Position, skill: Skill): Position[] => {
+     const targets: Position[] = [];
+     for(let r=0; r<8; r++) for(let c=0; c<8; c++) {
+         const t = boardState[r][c];
+         const dist = Math.max(Math.abs(r - pos.row), Math.abs(c - pos.col));
+         if (dist <= skill.range) {
+             if(t) {
+                if (skill.type === 'heal' ? t.color === boardState[pos.row][pos.col]!.color : t.color !== boardState[pos.row][pos.col]!.color) {
+                    targets.push({row: r, col: c});
                 }
-            }
+             }
+         }
+     }
+     return targets;
+  };
 
-            if (bestMove) {
-                movePiece(bestMove.from, bestMove.to);
-            } else {
-                endTurnLogic();
-            }
+  // --- Handlers ---
+  const handleSkillSelect = (skill: Skill) => {
+      if (!selectedPos) return;
+      const piece = board[selectedPos.row][selectedPos.col];
+      if (!piece || piece.mana < skill.manaCost) return;
+      setActiveSkill(skill);
+      setValidMoves(getSkillTargets(board, selectedPos, skill));
+  };
+
+  const handleDragStart = (e: React.DragEvent, r: number, c: number) => {
+      const piece = board[r][c];
+      if (piece && piece.color === 'blue' && piece.currentCooldown <= 0) {
+          setDraggedPos({ row: r, col: c });
+          setSelectedPos({ row: r, col: c });
+          e.dataTransfer.effectAllowed = "move";
+      } else {
+          e.preventDefault();
+      }
+  };
+
+  const handleDrop = (e: React.DragEvent, r: number, c: number) => {
+      e.preventDefault();
+      if (!draggedPos) return;
+      const moves = getMoves(board, draggedPos);
+      const isValid = moves.some(m => m.row === r && m.col === c);
+      if (isValid) {
+          setBoard(prev => {
+              const next = prev.map(row => [...row]);
+              executeActionOnBoard(next, draggedPos, { row: r, col: c }, null);
+              return next;
+          });
+          setScreenShake(true);
+          setTimeout(() => setScreenShake(false), 100);
+      }
+      setDraggedPos(null);
+      setSelectedPos(null);
+      setValidMoves([]);
+  };
+
+  const handleSquareClick = (row: number, col: number) => {
+    if (gameStatus !== 'playing') return;
+    const clickedPiece = board[row][col];
+    
+    if (selectedPos && activeSkill) {
+        if (validMoves.some(m => m.row === row && m.col === col)) {
+            setBoard(prev => {
+                const next = prev.map(r => [...r]);
+                executeActionOnBoard(next, selectedPos, { row, col }, activeSkill);
+                return next;
+            });
+            setActiveSkill(null);
+            setValidMoves([]);
+            setScreenShake(true);
+            setTimeout(() => setScreenShake(false), 200);
+        } else {
+            setActiveSkill(null);
+            setValidMoves([]);
         }
+        return;
+    }
 
-        function checkWin(mover, target, pos) {
-             let win = false;
-            const g = state.goal;
-            if (g.type === 'king_slayer' && target?.type === 'k') win = true;
-            if (g.type === 'bounty_hunter' && target?.id === g.targetId) win = true;
-            
-            // Treasure Logic Fix: Only win if Player (White) captures it
-            if (g.type === 'treasure' && target?.id === 'treasure_chest') {
-                if (mover.color === 'white') {
-                    win = true;
-                } else {
-                    showMessage("AI destroyed Treasure!", "red");
-                    // AI destroyed it, but game doesn't end immediately unless it was the only goal?
-                    // For now, let's treat it as failure if AI gets it, or just it's gone.
-                    // Better UX: AI simply removes it, player loses condition to win -> eventually loss by turns or restart
-                    // But to prevent softlock, let's trigger Loss.
-                    gameOver(false, "Treasure Destroyed by Enemy");
-                    return true;
-                }
-            }
-            
-            if (g.type === 'boss_raid' && target?.id === g.bossId) win = true;
-            if (g.type === 'reaper' && state.eliminatedCount >= g.count) win = true;
-            if (g.type === 'blitz' && mover.color === 'white' && mover.type === 'p' && pos.r === 0) win = true;
-            
-            if (win) { endGame(true, "MISSION COMPLETE"); return true; }
-            return false;
+    if (clickedPiece?.color === 'blue') {
+      if (clickedPiece.currentCooldown > 0) {
+          triggerEffect(row, col, 'buff', '⏳ 쿨타임');
+          return;
+      }
+      setSelectedPos({ row, col });
+      setValidMoves(getMoves(board, { row, col }));
+      setActiveSkill(null);
+      return;
+    }
+
+    if (selectedPos && validMoves.some(m => m.row === row && m.col === col)) {
+        setBoard(prev => {
+            const next = prev.map(r => [...r]);
+            executeActionOnBoard(next, selectedPos, { row, col }, null);
+            return next;
+        });
+        setSelectedPos(null);
+        setValidMoves([]);
+    }
+  };
+
+  // 키보드 핸들러
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (gameStatus !== 'playing') return;
+      if (e.key === 'Escape') {
+        setSelectedPos(null);
+        setValidMoves([]);
+        setActiveSkill(null);
+        return;
+      }
+      if (selectedPos && ['q', 'w', 'e', 'r'].includes(e.key.toLowerCase())) {
+        const piece = board[selectedPos.row][selectedPos.col];
+        if (piece && piece.color === 'blue') {
+          const skillKey = e.key.toUpperCase() as SkillKey;
+          const skill = piece.skills.find(s => s.key === skillKey);
+          if (skill && piece.mana >= skill.manaCost && piece.currentCooldown <= 0) {
+              handleSkillSelect(skill);
+          }
         }
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [selectedPos, board, gameStatus]);
 
-        function checkDefeatImmediately() {
-            if (getAllPieces('white').length === 0) { endGame(false, "Lossmate: 전멸했습니다."); return true; }
-            if (state.goal.type === 'escort') {
-                const vip = getAllPieces('white').find(p => p.id === state.goal.vipId);
-                if (!vip) { endGame(false, "Locationmate: VIP가 사망했습니다."); return true; }
-            }
-            return false;
+  return (
+    <div className={`flex flex-col h-screen bg-black text-white overflow-hidden font-sans select-none ${screenShake ? 'animate-shake' : ''}`}>
+      
+      {/* Header */}
+      <div className="flex-none p-4 flex justify-between items-center bg-gradient-to-b from-slate-900 to-transparent z-10">
+        <h1 className="text-2xl font-black italic tracking-tighter text-transparent bg-clip-text bg-gradient-to-r from-cyan-400 to-purple-500 shadow-neon">
+          HERO CHESS <span className="text-sm not-italic text-white">3.3</span>
+        </h1>
+        <div className="flex gap-2 text-xs">
+           <div className={`px-3 py-1 bg-slate-800 rounded border flex items-center gap-1 ${selectedDifficulty.color}`}>
+                <Activity size={14} />
+                <span>{selectedDifficulty.label}</span>
+            </div>
+            <div className="px-3 py-1 bg-slate-800 rounded border border-slate-700 flex items-center gap-1">
+                <Timer size={14} className="text-yellow-400"/>
+                <span>12초 부활</span>
+            </div>
+        </div>
+      </div>
+
+      {/* Main Board & Overlays */}
+      <div className="flex-1 relative flex items-center justify-center">
+        
+        {/* Lobby Overlay */}
+        {gameStatus === 'lobby' && (
+            <div className="absolute inset-0 z-50 bg-black/90 flex flex-col items-center justify-center animate-fade-in backdrop-blur-md">
+                <h1 className="text-6xl font-black text-transparent bg-clip-text bg-gradient-to-r from-cyan-400 to-purple-600 mb-2">HERO CHESS</h1>
+                <p className="text-slate-400 mb-8 font-mono">Select Difficulty to Start</p>
+                <div className="grid grid-cols-2 gap-4 w-full max-w-md px-4">
+                    {DIFFICULTIES.map((diff) => (
+                        <button 
+                            key={diff.label}
+                            onClick={() => startGame(diff)}
+                            className={`p-4 border-2 rounded-xl font-bold text-lg hover:scale-105 active:scale-95 transition-all
+                                ${diff.color.includes('purple') ? 'bg-purple-900/20 hover:bg-purple-900/40' : 'bg-slate-800 hover:bg-slate-700'}
+                                ${diff.color}
+                            `}
+                        >
+                            {diff.label}
+                            <div className="text-[10px] opacity-70 font-normal">AI 반응: {diff.aiDelay/1000}초</div>
+                        </button>
+                    ))}
+                </div>
+            </div>
+        )}
+
+        {/* Countdown Overlay */}
+        {gameStatus === 'countdown' && (
+            <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
+                <div className="text-9xl font-black text-white animate-ping">{countDown}</div>
+            </div>
+        )}
+
+        {/* Game Over Overlay */}
+        {gameStatus === 'gameover' && (
+            <div className="absolute inset-0 z-50 bg-black/90 flex flex-col items-center justify-center animate-fade-in">
+              <h2 className="text-6xl font-black mb-8 text-transparent bg-clip-text bg-gradient-to-r from-yellow-400 to-red-600 animate-pulse">
+                {winner}
+              </h2>
+              <button onClick={() => setGameStatus('lobby')} className="px-8 py-4 bg-white text-black font-bold text-xl rounded-full hover:scale-110 transition-transform flex items-center gap-2">
+                <RotateCcw size={20} /> 로비로 돌아가기
+              </button>
+            </div>
+        )}
+
+        {/* Graveyard UI (Left Side) */}
+        {gameStatus === 'playing' && (
+            <div className="absolute left-2 top-2 bottom-2 w-16 sm:w-20 bg-slate-900/80 rounded-lg border border-slate-700 p-2 flex flex-col gap-2 overflow-y-auto z-10">
+                <div className="text-[10px] text-center text-slate-500 font-bold border-b border-slate-700 pb-1">부활 대기</div>
+                {graveyard.map((g, i) => (
+                    <div key={i} className="relative bg-slate-800 rounded p-1 opacity-80">
+                        <div className={`text-xl text-center ${g.piece.color === 'blue' ? 'text-blue-400' : 'text-red-400'}`}>
+                            {getPieceIcon(g.piece.type)}
+                        </div>
+                        <div className="absolute inset-0 flex items-center justify-center bg-black/50 text-xs font-bold text-white">
+                            {Math.ceil(g.respawnTimeLeft / 1000)}
+                        </div>
+                    </div>
+                ))}
+            </div>
+        )}
+
+        {/* Board */}
+        <div className="w-full max-w-[600px] aspect-square p-2 ml-16 sm:ml-0"> {/* ml-16 for graveyard space */}
+            <div className="w-full h-full grid grid-cols-8 gap-0.5 bg-slate-900 rounded-lg border border-slate-800 relative shadow-[0_0_50px_rgba(0,0,0,0.5)]">
+                {board.map((row, r) => (
+                    row.map((piece, c) => {
+                        const isSelected = selectedPos?.row === r && selectedPos?.col === c;
+                        const isValid = validMoves.some(m => m.row === r && m.col === c);
+                        const effect = effects.find(e => e.row === r && e.col === c);
+                        const isSkillReady = piece?.color === 'blue' && piece.currentCooldown <= 0 && piece.skills.some(s => piece.mana >= s.manaCost);
+
+                        return (
+                            <div
+                                key={`${r}-${c}`}
+                                onMouseDown={() => handleSquareClick(r, c)}
+                                onDragOver={(e) => e.preventDefault()}
+                                onDrop={(e) => handleDrop(e, r, c)}
+                                draggable={!!piece && piece.color === 'blue' && piece.currentCooldown <= 0}
+                                onDragStart={(e) => handleDragStart(e, r, c)}
+                                className={`
+                                    relative flex items-center justify-center rounded-[2px] transition-colors duration-75
+                                    ${(r + c) % 2 === 0 ? 'bg-slate-800/50' : 'bg-slate-900/50'}
+                                    ${isSelected ? 'bg-cyan-900/40 ring-1 ring-cyan-400' : ''}
+                                    ${isValid && !piece ? 'after:w-2 after:h-2 after:bg-cyan-400/30 after:rounded-full' : ''}
+                                    ${isValid && piece ? 'ring-1 ring-red-500 bg-red-900/20' : ''}
+                                    ${activeSkill && isValid ? 'cursor-crosshair' : ''}
+                                    ${isSkillReady && !isSelected ? 'ring-2 ring-yellow-400/50 z-10 animate-pulse' : ''}
+                                `}
+                            >
+                                {effect && (
+                                    <div className="absolute inset-0 z-50 flex items-center justify-center pointer-events-none">
+                                         <div className={`text-xl font-bold animate-float-up drop-shadow-[0_2px_2px_rgba(0,0,0,1)]
+                                            ${effect.type === 'heal' ? 'text-green-400' : 'text-white'}
+                                            ${effect.type === 'explosion' ? 'text-orange-500 text-3xl' : ''}
+                                            ${effect.type === 'buff' ? 'text-blue-300 text-xs' : ''}
+                                            ${effect.type === 'levelUp' ? 'text-yellow-300 text-lg shadow-black' : ''}
+                                        `}>
+                                            {effect.text}
+                                            {effect.type === 'explosion' && <Flame className="inline w-6 h-6 text-orange-500"/>}
+                                        </div>
+                                    </div>
+                                )}
+
+                                {piece && (
+                                    <div className={`relative w-full h-full flex items-center justify-center group ${piece.currentCooldown > 0 ? 'grayscale opacity-70' : 'cursor-grab active:cursor-grabbing'}`}>
+                                        {/* Cooldown Overlay */}
+                                        {piece.currentCooldown > 0 && (
+                                            <div className="absolute inset-0 bg-black/40 z-10 flex items-end justify-center">
+                                                <div className="w-full bg-cyan-500/20 origin-bottom transition-all duration-75" style={{ height: `${(piece.currentCooldown / piece.maxCooldown) * 100}%` }} />
+                                            </div>
+                                        )}
+                                        {/* HP Bar */}
+                                        <div className="absolute top-1 w-[80%] h-0.5 bg-black rounded-full overflow-hidden z-20">
+                                            <div className={`h-full ${piece.color === 'blue' ? 'bg-green-400' : 'bg-red-500'}`} style={{ width: `${(piece.hp / piece.maxHp) * 100}%` }} />
+                                        </div>
+                                        {/* Icon */}
+                                        <div className={`text-3xl sm:text-4xl z-20 transition-transform ${piece.currentCooldown <= 0 ? 'scale-100 hover:scale-110' : 'scale-95'} ${piece.color === 'blue' ? 'text-cyan-100 drop-shadow-[0_0_5px_rgba(34,211,238,0.5)]' : 'text-rose-100 drop-shadow-[0_0_5px_rgba(244,63,94,0.5)]'}`}>
+                                            {getPieceIcon(piece.type)}
+                                        </div>
+                                        {/* Lv Badge */}
+                                        <div className="absolute top-0 left-0 bg-black/60 text-[8px] sm:text-[10px] text-yellow-400 px-1 rounded-br z-20 font-bold">{piece.level}</div>
+                                        {/* Mana Bar */}
+                                        <div className="absolute bottom-1 w-[60%] h-0.5 bg-black rounded-full overflow-hidden z-20">
+                                            <div className="h-full bg-blue-500" style={{ width: `${(piece.mana / piece.maxMana) * 100}%` }} />
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+                        );
+                    })
+                ))}
+            </div>
+        </div>
+      </div>
+
+      {/* Control Panel */}
+      <div className="flex-none bg-slate-900 border-t border-slate-800 p-4 safe-area-pb">
+        {selectedPos && board[selectedPos.row][selectedPos.col] && gameStatus === 'playing' ? (
+            <div className="max-w-xl mx-auto">
+                <div className="flex items-center justify-between mb-2">
+                     <span className="font-bold text-cyan-400 text-lg flex items-center gap-2">
+                        {board[selectedPos.row][selectedPos.col]!.role}
+                        <span className="text-xs text-yellow-400 border border-yellow-500/30 px-1.5 rounded">Lv.{board[selectedPos.row][selectedPos.col]!.level}</span>
+                     </span>
+                     <span className="text-xs text-slate-400">Q W E R / ESC</span>
+                </div>
+                <div className="grid grid-cols-4 gap-2 h-14">
+                    {board[selectedPos.row][selectedPos.col]!.skills.map(skill => (
+                        <button
+                            key={skill.key}
+                            onClick={() => handleSkillSelect(skill)}
+                            disabled={board[selectedPos.row][selectedPos.col]!.currentCooldown > 0 || board[selectedPos.row][selectedPos.col]!.mana < skill.manaCost}
+                            className={`rounded bg-slate-800 border border-slate-700 flex flex-col items-center justify-center relative overflow-hidden
+                                ${activeSkill?.key === skill.key ? 'border-yellow-400 bg-yellow-900/20' : ''}
+                                disabled:opacity-30 disabled:cursor-not-allowed hover:bg-slate-700 active:scale-95 transition-all
+                            `}
+                        >
+                            <span className="text-xs font-bold text-yellow-400 absolute top-1 left-2">{skill.key}</span>
+                            <span className="text-[10px] text-white mt-3">{skill.name}</span>
+                        </button>
+                    ))}
+                    {[...Array(4 - board[selectedPos.row][selectedPos.col]!.skills.length)].map((_, i) => (
+                        <div key={i} className="rounded bg-slate-900/50 border border-slate-800"></div>
+                    ))}
+                </div>
+            </div>
+        ) : (
+            <div className="text-center text-slate-500 text-sm h-20 flex flex-col items-center justify-center gap-1">
+                {gameStatus === 'playing' ? (
+                    <>
+                        <Hand size={24} className="animate-bounce mb-1 opacity-50"/>
+                        <div>유닛을 클릭하거나 드래그하여 명령을 내리세요</div>
+                    </>
+                ) : (
+                    <div className="text-slate-600">게임 대기중...</div>
+                )}
+            </div>
+        )}
+      </div>
+
+      <style>{`
+        @keyframes shake {
+          0%, 100% { transform: translateX(0); }
+          25% { transform: translateX(-5px); }
+          75% { transform: translateX(5px); }
         }
-
-        function checkTurnDefeat() {
-            if ((state.goal.type === 'survive' || state.goal.type === 'escort') && state.turnCount > state.maxTurns) {
-                endGame(true, "MISSION SUCCESS!");
-                return;
-            }
-            if (state.turnCount > state.maxTurns) {
-                endGame(false, "Turnmate: 턴 제한 초과.");
-            }
+        .animate-shake { animation: shake 0.2s ease-in-out; }
+        .safe-area-pb { padding-bottom: env(safe-area-inset-bottom); }
+        .animate-float-up { animation: float-up 1s ease-out forwards; }
+        @keyframes float-up {
+          0% { transform: translateY(0) scale(1); opacity: 1; }
+          100% { transform: translateY(-20px) scale(1.2); opacity: 0; }
         }
-
-        function endGame(success, reason) {
-            state.isGameOver = true;
-            document.getElementById('ai-overlay').classList.add('hidden');
-            render();
-            const m = document.getElementById('modal');
-            m.classList.remove('hidden');
-            document.getElementById('modal-title').innerText = success ? "VICTORY" : "DEFEAT";
-            document.getElementById('modal-title').className = success ? "text-2xl font-bold mb-2 text-cyan-400" : "text-2xl font-bold mb-2 text-red-500";
-            document.getElementById('modal-reason').innerText = reason;
-            
-            const btn = document.getElementById('modal-btn');
-            if (success) {
-                btn.onclick = () => { state.run++; startRun(); };
-                btn.innerText = "NEXT RUN >>";
-            } else {
-                state.lives--;
-                if(state.lives > 0) {
-                    btn.onclick = startRun;
-                    btn.innerText = "RETRY LEVEL";
-                } else {
-                    btn.onclick = goToLobby;
-                    btn.innerText = "GAME OVER";
-                }
-            }
-        }
-
-        function nextRun() {
-            if (state.run >= 12) {
-                goToLobby();
-            } else {
-                state.run++;
-                startRun();
-            }
-        }
-
-        function showMessage(msg, color='amber') { 
-            const box = document.getElementById('message-box');
-            box.innerText = msg;
-            box.className = `text-sm min-h-[1.5rem] mb-2 font-bold transition-all duration-200 text-${color}-300`;
-            box.classList.add('scale-110');
-            setTimeout(() => box.classList.remove('scale-110'), 200);
-        }
-
-        function render() {
-            const b = document.getElementById('board');
-            b.innerHTML = '';
-            let borderColor = state.turn === 'white' ? 'turn-white' : 'turn-black';
-            b.className = `board-container rounded shadow-2xl ${state.boardType}-type ${borderColor}`;
-            document.getElementById('board-badge').innerText = state.boardType.toUpperCase();
-
-            for(let r=0; r<8; r++) for(let c=0; c<8; c++) {
-                const cell = document.createElement('div');
-                cell.className = `cell ${(r+c)%2===0?'white':'black'}`;
-                
-                if (state.boardType === 'fog' && !state.fog[r][c]) cell.classList.add('fog-hidden');
-                if (state.boardType === 'portal' && state.portals.some(x=>x.r===r && x.c===c)) cell.classList.add('portal-cell');
-
-                if (state.validMoves.some(m=>m.r===r && m.c===c)) {
-                    state.board[r][c] ? cell.classList.add('valid-capture') : cell.classList.add('valid-move');
-                }
-                
-                if (state.selected && state.selected.r===r && state.selected.c===c) cell.classList.add('selected');
-
-                const p = state.board[r][c];
-                if (p) {
-                    const span = document.createElement('span');
-                    span.className = `piece ${p.color}-team`;
-                    if (p.type === 'treasure') span.className = `piece neutral-team`;
-                    span.textContent = p.type==='treasure' ? '💎' : PIECES[p.color][p.type];
-                    
-                    // Skill Badge
-                    if(p.skill) {
-                        const s = SKILLS.find(x=>x.id===p.skill);
-                        const badge = document.createElement('div');
-                        badge.className = `skill-badge skill-${p.skill}`;
-                        badge.textContent = s ? s.icon : '?';
-                        span.appendChild(badge);
-                    }
-
-                    const g = state.goal;
-                    if ((g.type==='bounty_hunter' && p.id===g.targetId) || 
-                        (g.type==='escort' && p.id===g.vipId) ||
-                        (g.type==='boss_raid' && p.id===g.bossId) ||
-                        (g.type==='treasure' && p.id==='treasure_chest')) {
-                        const mark = document.createElement('div');
-                        mark.className = 'target-mark';
-                        mark.style.borderColor = g.type==='escort' ? '#4ade80' : '#facc15';
-                        span.appendChild(mark);
-                    }
-                    if (isFrozen(r, c, p.color)) span.classList.add('frozen-effect'); 
-                    cell.appendChild(span);
-                }
-                cell.onclick = () => checkClick(r,c);
-                b.appendChild(cell);
-            }
-
-            document.getElementById('run-current').innerText = state.run;
-            document.getElementById('turn-now').innerText = state.turnCount;
-            document.getElementById('turn-max').innerText = state.maxTurns;
-            document.getElementById('goal-text').innerText = state.goal.desc;
-            document.getElementById('lives-text').innerText = '♥'.repeat(state.lives);
-            
-            if (state.goal.type === 'reaper') {
-                const sub = document.getElementById('goal-sub');
-                sub.classList.remove('hidden');
-                sub.innerText = `(${state.eliminatedCount}/${state.goal.count})`;
-            } else {
-                 document.getElementById('goal-sub').classList.add('hidden');
-            }
-        }
-    </script>
-</body>
-</html>
+      `}</style>
+    </div>
+  );
+}
