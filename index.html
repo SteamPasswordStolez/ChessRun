@@ -1,909 +1,1145 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { 
-  Shield, Sword, Zap, Skull, Crosshair, 
-  Cpu, User, Activity, Heart, Flame, MousePointer2, Timer, Wind, Hand,
-  Play, RotateCcw, Ghost
-} from 'lucide-react';
-
-// --- 타입 정의 ---
-type Color = 'blue' | 'red';
-type Role = 'Minion' | 'Assassin' | 'Mage' | 'Tank' | 'Carry' | 'Nexus';
-type PieceType = 'p' | 'n' | 'b' | 'r' | 'q' | 'k';
-type SkillKey = 'Q' | 'W' | 'E' | 'R';
-type GameStatus = 'lobby' | 'countdown' | 'playing' | 'gameover';
-
-interface Skill {
-  key: SkillKey;
-  name: string;
-  manaCost: number;
-  range: number;
-  damageRatio: number;
-  type: 'damage' | 'heal' | 'buff_def';
-  desc: string;
-  cooldown: number;
-}
-
-interface Piece {
-  id: string;
-  type: PieceType;
-  role: Role;
-  color: Color;
-  hp: number;
-  maxHp: number;
-  mana: number;
-  maxMana: number;
-  attack: number;
-  defense: number;
-  value: number;
-  level: number;
-  xp: number;
-  maxXp: number;
-  skills: Skill[];
-  speed: number;
-  currentCooldown: number;
-  maxCooldown: number;
-}
-
-interface DeadPiece {
-  piece: Piece;
-  respawnTimeLeft: number; // ms 단위
-}
-
-interface Position {
-  row: number;
-  col: number;
-}
-
-interface VisualEffect {
-  id: number;
-  row: number;
-  col: number;
-  type: 'hit' | 'crit' | 'heal' | 'buff' | 'explosion' | 'levelUp' | 'projectile';
-  text?: string;
-}
-
-interface Difficulty {
-  label: string;
-  aiDelay: number; // AI 행동 간격 (ms)
-  color: string;
-}
-
-const DIFFICULTIES: Difficulty[] = [
-  { label: '매우 쉬움', aiDelay: 3000, color: 'text-green-400 border-green-400' },
-  { label: '쉬움', aiDelay: 2000, color: 'text-blue-400 border-blue-400' },
-  { label: '보통', aiDelay: 1200, color: 'text-yellow-400 border-yellow-400' },
-  { label: '어려움', aiDelay: 800, color: 'text-orange-500 border-orange-500' },
-  { label: '매우 어려움', aiDelay: 500, color: 'text-red-500 border-red-500' },
-  { label: '탈인간', aiDelay: 200, color: 'text-purple-500 border-purple-500 animate-pulse' },
-];
-
-// --- 데이터 설정 ---
-const getSkills = (role: Role): Skill[] => {
-  switch (role) {
-    case 'Minion': return [{ key: 'Q', name: '강타', manaCost: 30, range: 1, damageRatio: 1.5, type: 'damage', desc: '강력한 공격', cooldown: 3 }];
-    case 'Assassin': return [
-      { key: 'Q', name: '단검', manaCost: 40, range: 3, damageRatio: 1.2, type: 'damage', desc: '원거리 견제', cooldown: 2 },
-      { key: 'R', name: '암살', manaCost: 100, range: 1, damageRatio: 3.0, type: 'damage', desc: '치명타', cooldown: 10 }
-    ];
-    case 'Mage': return [
-      { key: 'W', name: '치유', manaCost: 50, range: 3, damageRatio: 1.5, type: 'heal', desc: '아군 회복', cooldown: 5 },
-      { key: 'R', name: '메테오', manaCost: 100, range: 4, damageRatio: 2.5, type: 'damage', desc: '광역 피해', cooldown: 8 }
-    ];
-    case 'Tank': return [
-      { key: 'W', name: '철벽', manaCost: 40, range: 0, damageRatio: 0, type: 'buff_def', desc: '방어 증가', cooldown: 6 },
-      { key: 'E', name: '지진', manaCost: 60, range: 1, damageRatio: 1.8, type: 'damage', desc: '주변 강타', cooldown: 5 }
-    ];
-    case 'Carry': return [
-      { key: 'Q', name: '저격', manaCost: 30, range: 4, damageRatio: 1.3, type: 'damage', desc: '장거리 사격', cooldown: 3 },
-      { key: 'R', name: '난사', manaCost: 100, range: 7, damageRatio: 2.5, type: 'damage', desc: '초장거리', cooldown: 12 }
-    ];
-    case 'Nexus': return [
-       { key: 'Q', name: '레이저', manaCost: 20, range: 5, damageRatio: 1.5, type: 'damage', desc: '방어 사격', cooldown: 2 },
-       { key: 'R', name: '행성파괴', manaCost: 150, range: 99, damageRatio: 3.0, type: 'damage', desc: '전체 공격', cooldown: 30 }
-    ];
-    default: return [];
-  }
-};
-
-const getBaseStats = (type: PieceType): Omit<Piece, 'id' | 'color' | 'level' | 'xp' | 'maxXp' | 'skills' | 'currentCooldown' | 'maxCooldown'> => {
-  switch (type) {
-    case 'p': return { role: 'Minion', hp: 200, maxHp: 200, mana: 0, maxMana: 100, attack: 40, defense: 10, value: 100, speed: 2.5 };
-    case 'n': return { role: 'Assassin', hp: 250, maxHp: 250, mana: 50, maxMana: 100, attack: 90, defense: 15, value: 350, speed: 4.0 };
-    case 'b': return { role: 'Mage', hp: 220, maxHp: 220, mana: 50, maxMana: 100, attack: 85, defense: 5, value: 350, speed: 2.0 };
-    case 'r': return { role: 'Tank', hp: 600, maxHp: 600, mana: 50, maxMana: 150, attack: 50, defense: 40, value: 550, speed: 1.5 };
-    case 'q': return { role: 'Carry', hp: 350, maxHp: 350, mana: 50, maxMana: 150, attack: 120, defense: 20, value: 900, speed: 3.0 };
-    case 'k': return { role: 'Nexus', hp: 5000, maxHp: 5000, mana: 100, maxMana: 300, attack: 50, defense: 60, value: 9999, speed: 5.0 };
-    default: return { role: 'Minion', hp: 200, maxHp: 200, mana: 0, maxMana: 100, attack: 40, defense: 10, value: 100, speed: 2.0 };
-  }
-};
-
-const createPiece = (type: PieceType, color: Color, idSuffix: string): Piece => {
-  const stats = getBaseStats(type);
-  return {
-    ...stats,
-    id: `${color}-${type}-${idSuffix}`,
-    type,
-    color,
-    level: 1,
-    xp: 0,
-    maxXp: 100,
-    skills: getSkills(stats.role),
-    currentCooldown: 0,
-    maxCooldown: 100
-  };
-};
-
-const initialBoardSetup = (): (Piece | null)[][] => {
-  const board = Array(8).fill(null).map(() => Array(8).fill(null));
-  const backRow: PieceType[] = ['r', 'n', 'b', 'q', 'k', 'b', 'n', 'r'];
-  backRow.forEach((type, col) => board[0][col] = createPiece(type, 'red', `0-${col}`));
-  Array(8).fill(null).forEach((_, col) => board[1][col] = createPiece('p', 'red', `1-${col}`));
-  Array(8).fill(null).forEach((_, col) => board[6][col] = createPiece('p', 'blue', `6-${col}`));
-  backRow.forEach((type, col) => board[7][col] = createPiece(type, 'blue', `7-${col}`));
-  return board;
-};
-
-const getPieceIcon = (type: PieceType) => {
-  const icons: Record<string, string> = { 'k': '♚', 'q': '♛', 'r': '♜', 'b': '♝', 'n': '♞', 'p': '♟︎' };
-  return icons[type];
-};
-
-const isValidPos = (r: number, c: number) => r >= 0 && r < 8 && c >= 0 && c < 8;
-
-export default function RealTimeActionChess() {
-  const [gameStatus, setGameStatus] = useState<GameStatus>('lobby');
-  const [selectedDifficulty, setSelectedDifficulty] = useState<Difficulty>(DIFFICULTIES[2]); // Default Normal
-  const [countDown, setCountDown] = useState(3);
-  
-  const [board, setBoard] = useState<(Piece | null)[][]>(initialBoardSetup());
-  const [graveyard, setGraveyard] = useState<DeadPiece[]>([]);
-  
-  const [selectedPos, setSelectedPos] = useState<Position | null>(null);
-  const [validMoves, setValidMoves] = useState<Position[]>([]);
-  const [logs, setLogs] = useState<string[]>(['로비 입장...']);
-  const [winner, setWinner] = useState<string | null>(null);
-  
-  const [activeSkill, setActiveSkill] = useState<Skill | null>(null);
-  const [effects, setEffects] = useState<VisualEffect[]>([]);
-  const [screenShake, setScreenShake] = useState(false);
-  const [draggedPos, setDraggedPos] = useState<Position | null>(null);
-
-  const effectIdRef = useRef(0);
-  const lastAiActionTimeRef = useRef(0);
-  const graveyardRef = useRef<DeadPiece[]>([]); // To avoid dependency cycles in interval
-
-  // Sync ref with state
-  useEffect(() => { graveyardRef.current = graveyard; }, [graveyard]);
-
-  const addLog = (msg: string) => setLogs(prev => [msg, ...prev].slice(0, 3));
-
-  const triggerEffect = (row: number, col: number, type: VisualEffect['type'], text?: string) => {
-    const id = effectIdRef.current++;
-    setEffects(prev => [...prev, { id, row, col, type, text }]);
-    setTimeout(() => {
-      setEffects(prev => prev.filter(e => e.id !== id));
-    }, 1000);
-  };
-
-  // --- 게임 시작 프로세스 ---
-  const startGame = (difficulty: Difficulty) => {
-    setSelectedDifficulty(difficulty);
-    setGameStatus('countdown');
-    setCountDown(3);
-    setBoard(initialBoardSetup());
-    setGraveyard([]);
-    setLogs([`난이도: ${difficulty.label}`, '전투 준비!']);
-    setWinner(null);
-  };
-
-  // --- 카운트다운 로직 ---
-  useEffect(() => {
-    if (gameStatus === 'countdown') {
-      if (countDown > 0) {
-        const timer = setTimeout(() => setCountDown(prev => prev - 1), 1000);
-        return () => clearTimeout(timer);
-      } else {
-        setGameStatus('playing');
-        addLog('전투 시작!');
-      }
-    }
-  }, [gameStatus, countDown]);
-
-  // --- 레벨업 로직 ---
-  const processLevelUp = (piece: Piece): { piece: Piece, leveledUp: boolean } => {
-    if (piece.xp >= piece.maxXp && piece.level < 18) {
-      const newPiece = { ...piece };
-      newPiece.level += 1;
-      newPiece.xp -= newPiece.maxXp;
-      newPiece.maxXp = Math.floor(newPiece.maxXp * 1.2);
-      newPiece.maxHp = Math.floor(newPiece.maxHp * 1.15);
-      newPiece.hp = newPiece.maxHp;
-      newPiece.maxMana = Math.floor(newPiece.maxMana * 1.1);
-      newPiece.mana = newPiece.maxMana;
-      newPiece.attack = Math.floor(newPiece.attack * 1.15);
-      newPiece.defense = Math.floor(newPiece.defense * 1.15);
-      return { piece: newPiece, leveledUp: true };
-    }
-    return { piece, leveledUp: false };
-  };
-
-  // --- 실시간 게임 루프 (Main Game Loop) ---
-  useEffect(() => {
-    if (gameStatus !== 'playing') return;
-
-    const tickRate = 50; 
-    const loop = setInterval(() => {
-      const now = Date.now();
-      
-      // 1. 리스폰 로직 (Graveyard 처리)
-      let spawnedUnits: { piece: Piece, r: number, c: number }[] = [];
-      
-      // Update Graveyard timers
-      setGraveyard(prevGraveyard => {
-        const nextGraveyard: DeadPiece[] = [];
-        prevGraveyard.forEach(dead => {
-            const timeLeft = dead.respawnTimeLeft - tickRate;
-            if (timeLeft <= 0) {
-                // 부활 시도 (상태만 저장, 실제 배치는 setBoard에서)
-                // Red: 0열, Blue: 7열
-                const spawnRow = dead.piece.color === 'red' ? 0 : 7;
-                // 빈 자리 찾기 로직은 setBoard 안에서 해야 정확함.
-                // 하지만 여기서는 Graveyard 상태 갱신이 먼저라...
-                // *간소화*: 부활 타이머가 다 되면 'Ready' 상태로 두고 setBoard에서 처리
-                nextGraveyard.push({ ...dead, respawnTimeLeft: 0 }); 
-            } else {
-                nextGraveyard.push({ ...dead, respawnTimeLeft: timeLeft });
-            }
-        });
-        return nextGraveyard;
-      });
-
-      setBoard(prevBoard => {
-        const nextBoard = prevBoard.map(row => row.map(p => p ? { ...p } : null));
-
-        // 1-1. 실제 리스폰 배치
-        // Graveyard ref를 사용하여 최신 상태 확인 (setGraveyard와 동기화 문제 회피를 위해 간단히 처리)
-        // 여기서는 Graveyard State 변경과 Board 변경을 한 틱에 완벽 동기화하기 어려우므로
-        // 별도의 로직으로 Board에 빈자리가 있으면 Graveyard에서 꺼내오는 방식을 사용
-        
-        // (위의 setGraveyard는 타이머만 줄임. 실제 부활은 여기서 처리하고 Graveyard에서 제거해야 함)
-        // 하지만 State Updater 안에서 다른 State를 set하면 안됨.
-        // 해결책: Board Loop 안에서 처리하지 않고, 별도 Effect나 Ref를 써야 하지만,
-        // 가장 쉬운 방법: Graveyard의 타이머 처리를 이 Loop 안에서 하지 않고,
-        // 이 Loop는 Board만 관장. Graveyard 관리는 별도 Interval? -> 성능 이슈.
-        // **통합**: Graveyard State를 Ref로 관리하거나,
-        // 그냥 Board 업데이트 시점에 Graveyard State를 참조하여 처리 (클로저 이슈 주의)
-        
-        // *Ref 기반 리스폰 처리*
-        const currentGraveyard = [...graveyardRef.current];
-        let graveyardChanged = false;
-        const remainingGraveyard: DeadPiece[] = [];
-
-        currentGraveyard.forEach(dead => {
-             if (dead.respawnTimeLeft <= 0) {
-                 const spawnRow = dead.piece.color === 'red' ? 0 : 7;
-                 // 빈자리 찾기
-                 let spawned = false;
-                 for (let c = 0; c < 8; c++) {
-                     if (!nextBoard[spawnRow][c]) {
-                         nextBoard[spawnRow][c] = { 
-                             ...dead.piece, 
-                             hp: dead.piece.maxHp, 
-                             mana: dead.piece.maxMana, 
-                             currentCooldown: 50 // 부활 후 잠깐 대기
-                         };
-                         triggerEffect(spawnRow, c, 'buff', '부활!');
-                         spawned = true;
-                         graveyardChanged = true;
-                         break;
-                     }
-                 }
-                 if (!spawned) remainingGraveyard.push(dead); // 자리가 없으면 대기
-             } else {
-                 remainingGraveyard.push(dead);
-             }
-        });
-
-        if (graveyardChanged) {
-            // This is a side effect inside setState, typically bad practice but works for sync in interval
-            // Better to use a useEffect to sync back to state, but let's try direct set for instant feedback
-            // setGraveyard(remainingGraveyard); // This might cause render loop or batching issues.
-            // Let's defer graveyard update to outside.
-            // *Correction*: We cannot update graveyard state inside setBoard. 
-            // We will just update board here. The graveyard timer update logic above handles the countdown.
-            // We need a way to tell the graveyard "hey, this unit respawned, remove it".
-        }
-
-        // 2. 쿨타임 감소
-        for(let r=0; r<8; r++) {
-            for(let c=0; c<8; c++) {
-                const p = nextBoard[r][c];
-                if (p && p.currentCooldown > 0) {
-                    p.currentCooldown = Math.max(0, p.currentCooldown - p.speed);
-                }
-            }
-        }
-
-        // 3. AI Logic (Difficulty 적용)
-        if (now - lastAiActionTimeRef.current > selectedDifficulty.aiDelay) { 
-            const aiUnits: {pos: Position, piece: Piece}[] = [];
-            nextBoard.forEach((row, r) => row.forEach((p, c) => {
-                if (p && p.color === 'red' && p.currentCooldown <= 0) {
-                    aiUnits.push({ pos: { row: r, col: c }, piece: p });
-                }
-            }));
-
-            if (aiUnits.length > 0) {
-                 const selectedAI = aiUnits[Math.floor(Math.random() * aiUnits.length)];
-                 const { pos, piece } = selectedAI;
-                 
-                 let acted = false;
-                 // 스킬
-                 if (piece.skills.length > 0 && Math.random() < 0.3) {
-                     const skill = piece.skills[Math.floor(Math.random() * piece.skills.length)];
-                     if (piece.mana >= skill.manaCost) {
-                         const skillTargets = getSkillTargets(nextBoard, pos, skill);
-                         const enemies = skillTargets.filter(t => nextBoard[t.row][t.col]?.color === 'blue');
-                         if (enemies.length > 0) {
-                             const targetPos = enemies[Math.floor(Math.random() * enemies.length)];
-                             executeActionOnBoard(nextBoard, pos, targetPos, skill);
-                             acted = true;
-                         }
-                     }
-                 }
-
-                 // 이동/공격
-                 if (!acted) {
-                     const moves = getMoves(nextBoard, pos);
-                     const enemies = moves.filter(t => nextBoard[t.row][t.col]?.color === 'blue');
-                     
-                     if (enemies.length > 0) {
-                         const targetPos = enemies[0];
-                         executeActionOnBoard(nextBoard, pos, targetPos, null);
-                         acted = true;
-                     } else {
-                         const validMoves = moves.filter(t => !nextBoard[t.row][t.col]);
-                         if (validMoves.length > 0) {
-                             validMoves.sort((a, b) => b.row - a.row);
-                             if (Math.random() < 0.5) {
-                                executeActionOnBoard(nextBoard, pos, validMoves[0], null);
-                                acted = true;
-                             }
-                         }
-                     }
-                 }
-
-                 if (acted) lastAiActionTimeRef.current = now;
-            }
-        }
-
-        return nextBoard;
-      });
-
-      // Graveyard removal sync (Board update logic above couldn't update graveyard state directly)
-      // Instead, we check the BOARD. If a unit that was in graveyard is now on board (impossible to track easily by ID without map)
-      // Alternative: Just use a ref for the graveyard "spawn ready" logic completely?
-      // Let's fix the Graveyard Logic properly:
-      // We will perform the 'spawn' logic via setBoard, and then clean up Graveyard in a separate setGraveyard call inside the interval
-      // by checking if the spot is taken? No.
-      // Re-approach:
-      // The interval updates Graveyard State -> Board State sequentially.
-      
-      setGraveyard(prev => {
-          // 1. Decrease Timers
-          const ticked = prev.map(g => ({ ...g, respawnTimeLeft: Math.max(0, g.respawnTimeLeft - tickRate) }));
-          
-          // 2. Try Spawn
-          const remaining: DeadPiece[] = [];
-          
-          // We need access to current board to check for empty spots.
-          // Since we are inside setInterval closure, 'board' state might be stale unless we use setBoard callback.
-          // But we can't combine them easily.
-          // TRICK: Use the mutable `boardRef` pattern? No, we have functional updates.
-          
-          // Let's just decrease timers here. The actual spawning will be done by a separate Effect monitoring `graveyard`.
-          return ticked;
-      });
-
-    }, tickRate);
-
-    return () => clearInterval(loop);
-  }, [gameStatus, selectedDifficulty]);
-
-  // --- 리스폰 전용 Effect (Graveyard 모니터링) ---
-  useEffect(() => {
-      if (gameStatus !== 'playing') return;
-      
-      const readyToSpawn = graveyard.filter(g => g.respawnTimeLeft <= 0);
-      if (readyToSpawn.length === 0) return;
-
-      setBoard(prevBoard => {
-          const nextBoard = prevBoard.map(row => [...row]);
-          const spawnedIds: string[] = [];
-
-          readyToSpawn.forEach(dead => {
-              const spawnRow = dead.piece.color === 'red' ? 0 : 7;
-              for (let c = 0; c < 8; c++) {
-                  if (!nextBoard[spawnRow][c]) {
-                      nextBoard[spawnRow][c] = { 
-                          ...dead.piece, 
-                          hp: dead.piece.maxHp, 
-                          mana: dead.piece.maxMana, 
-                          currentCooldown: 50
-                      };
-                      triggerEffect(spawnRow, c, 'buff', '부활!');
-                      spawnedIds.push(dead.piece.id);
-                      break;
-                  }
-              }
-          });
-
-          // 부활 성공한 유닛만 묘지에서 제거
-          if (spawnedIds.length > 0) {
-              // We need to update graveyard state, but we are inside setBoard.
-              // Use setTimeout to break render cycle or just handle it in next effect?
-              // Let's use a ref to signal cleanup needed?
-              // Or just call setGraveyard here (it triggers re-render but valid in effect)
-              // But we are inside setBoard callback... No, we are in useEffect.
-              // So we can call setGraveyard.
-              setTimeout(() => {
-                  setGraveyard(curr => curr.filter(g => !spawnedIds.includes(g.piece.id)));
-              }, 0);
-          }
-          return nextBoard;
-      });
-  }, [graveyard, gameStatus]);
-
-
-  // --- Action Logic ---
-  const executeActionOnBoard = (currentBoard: (Piece | null)[][], from: Position, to: Position, usedSkill: Skill | null) => {
-      const actor = currentBoard[from.row][from.col];
-      const target = currentBoard[to.row][to.col];
-      if (!actor) return;
-
-      actor.currentCooldown = actor.maxCooldown;
-
-      if (usedSkill) {
-          actor.mana -= usedSkill.manaCost;
-          if (target) {
-             const dmg = Math.floor(actor.attack * usedSkill.damageRatio);
-             const actualDmg = Math.max(10, dmg - target.defense);
-             target.hp -= actualDmg;
-             triggerEffect(to.row, to.col, 'explosion', `-${actualDmg}`);
-             actor.xp += 50;
-          }
-      } else {
-          if (target) {
-              const dmg = Math.max(10, actor.attack - target.defense);
-              target.hp -= dmg;
-              actor.mana = Math.min(actor.maxMana, actor.mana + 15);
-              triggerEffect(to.row, to.col, 'hit', `-${dmg}`);
-              actor.xp += 30;
-          } else {
-              currentBoard[to.row][to.col] = actor;
-              currentBoard[from.row][from.col] = null;
-          }
-      }
-
-      const piecesToCheck = [actor, target].filter(p => p !== null) as Piece[];
-      piecesToCheck.forEach(p => {
-          // 사망 체크
-          if (p === target && p.hp <= 0) {
-              if (p.type === 'k') {
-                 // 넥서스 파괴 시 게임 종료
-                 setWinner(actor.color === 'blue' ? 'VICTORY' : 'DEFEAT');
-                 setGameStatus('gameover');
-              } else {
-                 // 일반 기물 묘지로 이동 (setGraveyard는 Loop 밖에서 처리해야 함)
-                 // Board Logic 안이므로, State 업데이트를 비동기로 예약
-                 // 단, 이 함수는 setBoard 내부에서 호출되므로 여기서 직접 setGraveyard 호출 시 문제될 수 있음.
-                 // 하지만 React 18 배칭으로 인해 보통 괜찮음.
-                 // 안전하게 처리: 
-                 const deadUnit = { ...p };
-                 setTimeout(() => {
-                     setGraveyard(prev => [...prev, { piece: deadUnit, respawnTimeLeft: 12000 }]); // 12초
-                 }, 0);
-              }
-              
-              currentBoard[to.row][to.col] = null;
-              if (!usedSkill && target && p === target) {
-                  currentBoard[to.row][to.col] = actor;
-                  currentBoard[from.row][from.col] = null;
-                  actor.xp += 100;
-              } else {
-                  actor.xp += 80;
-              }
-          }
-
-          const lv = processLevelUp(p);
-          if (lv.leveledUp) {
-              Object.assign(p, lv.piece);
-              const pPos = (p === actor && (!target || target.hp > 0)) ? from : to;
-              if (p.hp > 0) { // 살아있을 때만 레벨업 이펙트
-                triggerEffect(p === actor ? from.row : to.row, p === actor ? from.col : to.col, 'levelUp', 'Level Up!');
-              }
-          }
-      });
-  };
-
-  // --- 기존 Helper Functions ---
-  const getMoves = (boardState: (Piece | null)[][], pos: Position): Position[] => {
-    const piece = boardState[pos.row][pos.col];
-    if (!piece) return [];
-    const moves: Position[] = [];
-    const { type, color } = piece;
-    const check = (r: number, c: number) => {
-      if (!isValidPos(r, c)) return false;
-      const target = boardState[r][c];
-      if (target && target.color === color) return false;
-      moves.push({ row: r, col: c });
-      return !target;
-    };
-    const directions = {
-      straight: [[-1, 0], [1, 0], [0, -1], [0, 1]],
-      diagonal: [[-1, -1], [-1, 1], [1, -1], [1, 1]],
-      knight: [[-2, -1], [-2, 1], [-1, -2], [-1, 2], [1, -2], [1, 2], [2, -1], [2, 1]],
-    };
-    if (type === 'n') directions.knight.forEach(([dr, dc]) => check(pos.row + dr, pos.col + dc));
-    else if (type === 'r') directions.straight.forEach(([dr, dc]) => { let r = pos.row + dr, c = pos.col + dc; while (check(r, c)) { r += dr; c += dc; } });
-    else if (type === 'b') directions.diagonal.forEach(([dr, dc]) => { let r = pos.row + dr, c = pos.col + dc; while (check(r, c)) { r += dr; c += dc; } });
-    else if (type === 'q') [...directions.straight, ...directions.diagonal].forEach(([dr, dc]) => { let r = pos.row + dr, c = pos.col + dc; while (check(r, c)) { r += dr; c += dc; } });
-    else if (type === 'k') [...directions.straight, ...directions.diagonal].forEach(([dr, dc]) => check(pos.row + dr, pos.col + dc));
-    else if (type === 'p') {
-      const dir = color === 'blue' ? -1 : 1;
-      if (isValidPos(pos.row + dir, pos.col) && !boardState[pos.row + dir][pos.col]) {
-        moves.push({ row: pos.row + dir, col: pos.col });
-      }
-      [[dir, -1], [dir, 1]].forEach(([dr, dc]) => {
-        const r = pos.row + dr, c = pos.col + dc;
-        if (isValidPos(r, c)) {
-          const target = boardState[r][c];
-          if (target && target.color !== color) moves.push({ row: r, col: c });
-        }
-      });
-    }
-    return moves;
-  };
-
-  const getSkillTargets = (boardState: (Piece | null)[][], pos: Position, skill: Skill): Position[] => {
-     const targets: Position[] = [];
-     for(let r=0; r<8; r++) for(let c=0; c<8; c++) {
-         const t = boardState[r][c];
-         const dist = Math.max(Math.abs(r - pos.row), Math.abs(c - pos.col));
-         if (dist <= skill.range) {
-             if(t) {
-                if (skill.type === 'heal' ? t.color === boardState[pos.row][pos.col]!.color : t.color !== boardState[pos.row][pos.col]!.color) {
-                    targets.push({row: r, col: c});
-                }
-             }
-         }
-     }
-     return targets;
-  };
-
-  // --- Handlers ---
-  const handleSkillSelect = (skill: Skill) => {
-      if (!selectedPos) return;
-      const piece = board[selectedPos.row][selectedPos.col];
-      if (!piece || piece.mana < skill.manaCost) return;
-      setActiveSkill(skill);
-      setValidMoves(getSkillTargets(board, selectedPos, skill));
-  };
-
-  const handleDragStart = (e: React.DragEvent, r: number, c: number) => {
-      const piece = board[r][c];
-      if (piece && piece.color === 'blue' && piece.currentCooldown <= 0) {
-          setDraggedPos({ row: r, col: c });
-          setSelectedPos({ row: r, col: c });
-          e.dataTransfer.effectAllowed = "move";
-      } else {
-          e.preventDefault();
-      }
-  };
-
-  const handleDrop = (e: React.DragEvent, r: number, c: number) => {
-      e.preventDefault();
-      if (!draggedPos) return;
-      const moves = getMoves(board, draggedPos);
-      const isValid = moves.some(m => m.row === r && m.col === c);
-      if (isValid) {
-          setBoard(prev => {
-              const next = prev.map(row => [...row]);
-              executeActionOnBoard(next, draggedPos, { row: r, col: c }, null);
-              return next;
-          });
-          setScreenShake(true);
-          setTimeout(() => setScreenShake(false), 100);
-      }
-      setDraggedPos(null);
-      setSelectedPos(null);
-      setValidMoves([]);
-  };
-
-  const handleSquareClick = (row: number, col: number) => {
-    if (gameStatus !== 'playing') return;
-    const clickedPiece = board[row][col];
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Hero Chess 4.0 - Official Season 1</title>
     
-    if (selectedPos && activeSkill) {
-        if (validMoves.some(m => m.row === row && m.col === col)) {
-            setBoard(prev => {
-                const next = prev.map(r => [...r]);
-                executeActionOnBoard(next, selectedPos, { row, col }, activeSkill);
-                return next;
-            });
-            setActiveSkill(null);
-            setValidMoves([]);
-            setScreenShake(true);
-            setTimeout(() => setScreenShake(false), 200);
-        } else {
-            setActiveSkill(null);
-            setValidMoves([]);
-        }
-        return;
-    }
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- React & ReactDOM -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    
+    <!-- Babel -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 
-    if (clickedPiece?.color === 'blue') {
-      if (clickedPiece.currentCooldown > 0) {
-          triggerEffect(row, col, 'buff', '⏳ 쿨타임');
-          return;
-      }
-      setSelectedPos({ row, col });
-      setValidMoves(getMoves(board, { row, col }));
-      setActiveSkill(null);
-      return;
-    }
+    <style>
+        body { background-color: #000; overflow: hidden; touch-action: none; }
+        /* Animations */
+        @keyframes shake-sm { 0%, 100% { transform: translate(0, 0); } 25% { transform: translate(-2px, 1px); } 50% { transform: translate(1px, -1px); } 75% { transform: translate(-1px, 2px); } }
+        @keyframes shake-lg { 0%, 100% { transform: translate(0, 0); } 25% { transform: translate(-5px, 3px); } 50% { transform: translate(4px, -4px); } 75% { transform: translate(-3px, 5px); } }
+        @keyframes progress { 0% { width: 0%; } 100% { width: 100%; } }
+        @keyframes float-up { 0% { transform: translateY(0) scale(1); opacity: 1; } 50% { transform: translateY(-30px) scale(1.5); opacity: 1; } 100% { transform: translateY(-50px) scale(1.2); opacity: 0; } }
+        .animate-shake-sm { animation: shake-sm 0.1s ease-in-out; }
+        .animate-shake-lg { animation: shake-lg 0.2s ease-in-out; }
+        .animate-progress { animation: progress 2s linear infinite; }
+        .animate-float-up { animation: float-up 1s ease-out forwards; }
+        .no-scrollbar::-webkit-scrollbar { display: none; }
+        .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
 
-    if (selectedPos && validMoves.some(m => m.row === row && m.col === col)) {
-        setBoard(prev => {
-            const next = prev.map(r => [...r]);
-            executeActionOnBoard(next, selectedPos, { row, col }, null);
-            return next;
-        });
-        setSelectedPos(null);
-        setValidMoves([]);
-    }
-  };
+    <script type="text/babel" data-presets="react,typescript">
+        const { useState, useEffect, useCallback, useRef } = React;
 
-  // 키보드 핸들러
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (gameStatus !== 'playing') return;
-      if (e.key === 'Escape') {
-        setSelectedPos(null);
-        setValidMoves([]);
-        setActiveSkill(null);
-        return;
-      }
-      if (selectedPos && ['q', 'w', 'e', 'r'].includes(e.key.toLowerCase())) {
-        const piece = board[selectedPos.row][selectedPos.col];
-        if (piece && piece.color === 'blue') {
-          const skillKey = e.key.toUpperCase() as SkillKey;
-          const skill = piece.skills.find(s => s.key === skillKey);
-          if (skill && piece.mana >= skill.manaCost && piece.currentCooldown <= 0) {
-              handleSkillSelect(skill);
-          }
-        }
-      }
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [selectedPos, board, gameStatus]);
+        // --- Icons Implementation (No External Dependency) ---
+        const createIcon = (paths) => ({ size = 24, className = "", ...props }) => (
+            <svg xmlns="http://www.w3.org/2000/svg" width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className} {...props}>
+                {paths.map((d, i) => <path key={i} d={d} />)}
+            </svg>
+        );
 
-  return (
-    <div className={`flex flex-col h-screen bg-black text-white overflow-hidden font-sans select-none ${screenShake ? 'animate-shake' : ''}`}>
-      
-      {/* Header */}
-      <div className="flex-none p-4 flex justify-between items-center bg-gradient-to-b from-slate-900 to-transparent z-10">
-        <h1 className="text-2xl font-black italic tracking-tighter text-transparent bg-clip-text bg-gradient-to-r from-cyan-400 to-purple-500 shadow-neon">
-          HERO CHESS <span className="text-sm not-italic text-white">3.3</span>
-        </h1>
-        <div className="flex gap-2 text-xs">
-           <div className={`px-3 py-1 bg-slate-800 rounded border flex items-center gap-1 ${selectedDifficulty.color}`}>
-                <Activity size={14} />
-                <span>{selectedDifficulty.label}</span>
-            </div>
-            <div className="px-3 py-1 bg-slate-800 rounded border border-slate-700 flex items-center gap-1">
-                <Timer size={14} className="text-yellow-400"/>
-                <span>12초 부활</span>
-            </div>
-        </div>
-      </div>
+        const Icons = {
+            Shield: createIcon(["M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"]),
+            Sword: createIcon(["M14.5 17.5L3 22l4.5-11.5L21 3l-7.5 13.5z"]),
+            Zap: createIcon(["M13 2L3 14h9l-1 8 10-12h-9l1-8z"]),
+            Skull: createIcon(["M12 12c-2.3 0-4.5-.2-6.5-.6-2-1.8-3.5-3.7-3.5-6C2 2.8 6.5 1 12 1s10 1.8 10 4.4c0 2.3-1.5 4.2-3.5 6-.2.04-.4.07-.6.1", "M8 12v6c0 1.1.9 2 2 2h4c1.1 0 2-.9 2-2v-6"]),
+            Crosshair: createIcon(["M12 2v4", "M12 18v4", "M2 12h4", "M18 12h4", "M12 12m-3 0a3 3 0 1 0 6 0a3 3 0 1 0 -6 0"]),
+            Cpu: createIcon(["M5 9h14M5 15h14M9 5v14M15 5v14M4 4h16v16H4z"]),
+            User: createIcon(["M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2", "M12 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8z"]),
+            Activity: createIcon(["M22 12h-4l-3 9L9 3l-3 9H2"]),
+            Heart: createIcon(["M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"]),
+            Flame: createIcon(["M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.38-.5-2-1-3-1.072-2.143-.224-4.054 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.1.2-2.2.6-3.3.7.8 1.9 1.8 2.9 2.8z"]),
+            MousePointer2: createIcon(["M3 3l7.07 16.97 2.51-7.39 7.39-2.51L3 3z", "M13 13l6 6"]),
+            Timer: createIcon(["M10 2h4", "M12 14v-4", "M4 12a8 8 0 0 1 8-8 8 8 0 0 1 8 8 8 8 0 0 1-8 8 8 8 0 0 1-8-8z"]),
+            Wind: createIcon(["M9.59 4.59A2 2 0 1 1 11 8H2m10.59 11.41A2 2 0 1 0 14 16H2m15.73-8.27A2.5 2.5 0 1 1 19.5 12H2"]),
+            Hand: createIcon(["M18 11V6a2 2 0 0 0-2-2v0a2 2 0 0 0-2 2v0", "M14 10V4a2 2 0 0 0-2-2v0a2 2 0 0 0-2 2v2", "M10 10.5V6a2 2 0 0 0-2-2v0a2 2 0 0 0-2 2v8", "M18 8a2 2 0 1 1 4 0v6a8 8 0 0 1-8 8h-2c-2.8 0-4.5-.86-5.99-2.34l-3.6-3.6a2 2 0 0 1 2.83-2.82L7 15"]),
+            Play: createIcon(["M5 3l14 9-14 9V3z"]),
+            RotateCcw: createIcon(["M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8", "M3 3v5h5"]),
+            Ghost: createIcon(["M9 22l1-1h4l1 1h4a2 2 0 0 0 2-2V9c0-5-4-9-9-9S3 4 3 9v11a2 2 0 0 0 2 2h4z", "M10 13a2 2 0 1 0 4 0 2 2 0 0 0-4 0", "M9 9h.01", "M15 9h.01"]),
+            Star: createIcon(["M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"]),
+            Trophy: createIcon(["M6 9H4.5a2.5 2.5 0 0 1 0-5H6", "M18 9h1.5a2.5 2.5 0 0 0 0-5H18", "M4 22h16", "M8 22v-4.11a5 5 0 0 1-.89-2.58 8 8 0 0 1 13.78 0A5 5 0 0 1 16 17.89V22", "M12 2v10"]),
+            Sparkles: createIcon(["M12 2L9.19 8.63 2 12l7.19 3.37L12 22l2.81-6.63L22 12l-7.19-3.37L12 2z"]),
+            Gift: createIcon(["M20 12v10H4V12", "M2 7h20v5H2z", "M12 22V7", "M12 7H7.5a2.5 2.5 0 0 1 0-5C11 2 12 7 12 7z", "M12 7h4.5a2.5 2.5 0 0 0 0-5C13 2 12 7 12 7z"]),
+            Snowflake: createIcon(["M2 12h20", "M12 2v20", "M20 20L4 4", "M4 20L20 4", "m16 4-1.5 1.5", "m8 12-1.5-1.5", "m16 16 1.5 1.5", "m8 16 1.5-1.5", "m8 8-1.5-1.5", "m16 8 1.5 1.5"]),
+            RefreshCw: createIcon(["M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8", "M21 3v5h-5", "M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16", "M3 21v-5h5"]),
+            Globe: createIcon(["M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2z", "M2 12h20", "M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"]),
+            Users: createIcon(["M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2", "M9 7a4 4 0 1 0 0-8 4 4 0 0 0 0 8z", "M22 21v-2a4 4 0 0 0-3-3.87", "M16 3.13a4 4 0 0 1 0 7.75"]),
+            Medal: createIcon(["M12 8c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4z", "M14 2v2", "M10 2v2", "M7.5 10a6 6 0 1 0 9 0", "M12 22l-3-2-2 1V10", "M17 19l-2-1-3 2"]),
+            Crown: createIcon(["M2 4l3 12h14l3-12-6 7-4-7-4 7-6-7zm3 16h14"]),
+            Smartphone: createIcon(["M7 2h10a2 2 0 0 1 2 2v16a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2z", "M12 18h.01"]),
+            UserPlus: createIcon(["M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2", "M8.5 7a4 4 0 1 0 0-8 4 4 0 0 0 0 8z", "M20 8v6", "M23 11h-6"]),
+            Wifi: createIcon(["M5 12.55a11 11 0 0 1 14.08 0", "M1.42 9a16 16 0 0 1 21.16 0", "M8.53 16.11a6 6 0 0 1 6.95 0", "M12 20h.01"]),
+            Save: createIcon(["M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z", "M17 21v-8H7v8", "M7 3v5h8V3"])
+        };
 
-      {/* Main Board & Overlays */}
-      <div className="flex-1 relative flex items-center justify-center">
-        
-        {/* Lobby Overlay */}
-        {gameStatus === 'lobby' && (
-            <div className="absolute inset-0 z-50 bg-black/90 flex flex-col items-center justify-center animate-fade-in backdrop-blur-md">
-                <h1 className="text-6xl font-black text-transparent bg-clip-text bg-gradient-to-r from-cyan-400 to-purple-600 mb-2">HERO CHESS</h1>
-                <p className="text-slate-400 mb-8 font-mono">Select Difficulty to Start</p>
-                <div className="grid grid-cols-2 gap-4 w-full max-w-md px-4">
-                    {DIFFICULTIES.map((diff) => (
-                        <button 
-                            key={diff.label}
-                            onClick={() => startGame(diff)}
-                            className={`p-4 border-2 rounded-xl font-bold text-lg hover:scale-105 active:scale-95 transition-all
-                                ${diff.color.includes('purple') ? 'bg-purple-900/20 hover:bg-purple-900/40' : 'bg-slate-800 hover:bg-slate-700'}
-                                ${diff.color}
-                            `}
-                        >
-                            {diff.label}
-                            <div className="text-[10px] opacity-70 font-normal">AI 반응: {diff.aiDelay/1000}초</div>
-                        </button>
-                    ))}
-                </div>
-            </div>
-        )}
+        const { 
+            Shield, Sword, Zap, Skull, Crosshair, 
+            Cpu, User, Activity, Heart, Flame, MousePointer2, Timer, Wind, Hand,
+            Play, RotateCcw, Ghost, Star, Trophy, Sparkles, Gift, Snowflake, RefreshCw,
+            Globe, Users, Medal, Crown, Smartphone, UserPlus, Wifi, Save
+        } = Icons;
 
-        {/* Countdown Overlay */}
-        {gameStatus === 'countdown' && (
-            <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
-                <div className="text-9xl font-black text-white animate-ping">{countDown}</div>
-            </div>
-        )}
+        // --- Constants & Config ---
+        const RANK_TIERS = [
+            { name: '아이언', minMMR: 300, color: 'text-zinc-400 border-zinc-400', lossPenalty: 10 },
+            { name: '브론즈', minMMR: 600, color: 'text-orange-700 border-orange-700', lossPenalty: 12 },
+            { name: '실버', minMMR: 800, color: 'text-slate-300 border-slate-300', lossPenalty: 15 },
+            { name: '골드', minMMR: 1000, color: 'text-yellow-400 border-yellow-400', lossPenalty: 18 },
+            { name: '플래티넘', minMMR: 1250, color: 'text-cyan-400 border-cyan-400', lossPenalty: 20 },
+            { name: '다이아몬드', minMMR: 1550, color: 'text-blue-400 border-blue-400', lossPenalty: 22 },
+            { name: '글로우', minMMR: 2000, color: 'text-purple-400 border-purple-400', lossPenalty: 25 },
+            { name: '챌린저', minMMR: 2500, color: 'text-red-500 border-red-500', lossPenalty: 28 },
+            { name: '레전드', minMMR: 3000, color: 'text-yellow-200 border-yellow-200 animate-pulse', lossPenalty: 30 },
+        ];
 
-        {/* Game Over Overlay */}
-        {gameStatus === 'gameover' && (
-            <div className="absolute inset-0 z-50 bg-black/90 flex flex-col items-center justify-center animate-fade-in">
-              <h2 className="text-6xl font-black mb-8 text-transparent bg-clip-text bg-gradient-to-r from-yellow-400 to-red-600 animate-pulse">
-                {winner}
-              </h2>
-              <button onClick={() => setGameStatus('lobby')} className="px-8 py-4 bg-white text-black font-bold text-xl rounded-full hover:scale-110 transition-transform flex items-center gap-2">
-                <RotateCcw size={20} /> 로비로 돌아가기
-              </button>
-            </div>
-        )}
+        const DIFFICULTIES = [
+            { label: '매우 쉬움', aiDelay: 3000, color: 'text-green-400 border-green-400 shadow-green-400/20' },
+            { label: '쉬움', aiDelay: 2000, color: 'text-blue-400 border-blue-400 shadow-blue-400/20' },
+            { label: '보통', aiDelay: 1200, color: 'text-yellow-400 border-yellow-400 shadow-yellow-400/20' },
+            { label: '어려움', aiDelay: 800, color: 'text-orange-500 border-orange-500 shadow-orange-500/20' },
+            { label: '매우 어려움', aiDelay: 500, color: 'text-red-500 border-red-500 shadow-red-500/20' },
+            { label: '탈인간', aiDelay: 200, color: 'text-purple-500 border-purple-500 shadow-purple-500/20 animate-pulse' },
+        ];
 
-        {/* Graveyard UI (Left Side) */}
-        {gameStatus === 'playing' && (
-            <div className="absolute left-2 top-2 bottom-2 w-16 sm:w-20 bg-slate-900/80 rounded-lg border border-slate-700 p-2 flex flex-col gap-2 overflow-y-auto z-10">
-                <div className="text-[10px] text-center text-slate-500 font-bold border-b border-slate-700 pb-1">부활 대기</div>
-                {graveyard.map((g, i) => (
-                    <div key={i} className="relative bg-slate-800 rounded p-1 opacity-80">
-                        <div className={`text-xl text-center ${g.piece.color === 'blue' ? 'text-blue-400' : 'text-red-400'}`}>
-                            {getPieceIcon(g.piece.type)}
-                        </div>
-                        <div className="absolute inset-0 flex items-center justify-center bg-black/50 text-xs font-bold text-white">
-                            {Math.ceil(g.respawnTimeLeft / 1000)}
+        const getTier = (mmr) => {
+            for (let i = RANK_TIERS.length - 1; i >= 0; i--) {
+                if (mmr >= RANK_TIERS[i].minMMR) return RANK_TIERS[i];
+            }
+            return RANK_TIERS[0];
+        };
+
+        const getSkills = (role) => {
+            switch (role) {
+                case 'Minion': return [{ key: 'Q', name: '강타', manaCost: 30, range: 1, damageRatio: 1.5, type: 'damage', desc: '강력한 공격', cooldown: 3 }];
+                case 'Assassin': return [
+                    { key: 'Q', name: '단검', manaCost: 40, range: 3, damageRatio: 1.2, type: 'damage', desc: '원거리 견제', cooldown: 3 },
+                    { key: 'R', name: '암살', manaCost: 100, range: 1, damageRatio: 3.5, type: 'damage', desc: '치명타', cooldown: 12 }
+                ];
+                case 'Mage': return [
+                    { key: 'W', name: '치유', manaCost: 50, range: 3, damageRatio: 1.5, type: 'heal', desc: '아군 회복', cooldown: 6 },
+                    { key: 'R', name: '메테오', manaCost: 100, range: 4, damageRatio: 2.2, type: 'damage', desc: '광역 피해', cooldown: 10 }
+                ];
+                case 'Tank': return [
+                    { key: 'W', name: '철벽', manaCost: 40, range: 0, damageRatio: 0, type: 'buff_def', desc: '방어 증가', cooldown: 8 },
+                    { key: 'E', name: '지진', manaCost: 60, range: 1, damageRatio: 1.5, type: 'damage', desc: '주변 강타', cooldown: 6 }
+                ];
+                case 'Carry': return [
+                    { key: 'Q', name: '저격', manaCost: 30, range: 4, damageRatio: 1.3, type: 'damage', desc: '장거리 사격', cooldown: 4 },
+                    { key: 'R', name: '난사', manaCost: 100, range: 7, damageRatio: 2.0, type: 'damage', desc: '초장거리', cooldown: 15 }
+                ];
+                case 'Nexus': return [
+                    { key: 'Q', name: '방어 레이저', manaCost: 30, range: 5, damageRatio: 0.8, type: 'damage', desc: '약한 견제 사격', cooldown: 8 },
+                    { key: 'R', name: '행성파괴', manaCost: 200, range: 99, damageRatio: 1.2, type: 'damage', desc: '비상용 전체 공격', cooldown: 80 }
+                ];
+                default: return [];
+            }
+        };
+
+        const getBaseStats = (type) => {
+            switch (type) {
+                case 'p': return { role: 'Minion', hp: 200, maxHp: 200, mana: 0, maxMana: 100, attack: 40, defense: 10, value: 100, speed: 2.0 };
+                case 'n': return { role: 'Assassin', hp: 250, maxHp: 250, mana: 50, maxMana: 100, attack: 90, defense: 15, value: 350, speed: 3.5 };
+                case 'b': return { role: 'Mage', hp: 220, maxHp: 220, mana: 50, maxMana: 100, attack: 85, defense: 5, value: 350, speed: 1.8 };
+                case 'r': return { role: 'Tank', hp: 700, maxHp: 700, mana: 50, maxMana: 150, attack: 50, defense: 40, value: 550, speed: 1.2 };
+                case 'q': return { role: 'Carry', hp: 350, maxHp: 350, mana: 50, maxMana: 150, attack: 120, defense: 20, value: 900, speed: 2.5 };
+                case 'k': return { role: 'Nexus', hp: 10000, maxHp: 10000, mana: 100, maxMana: 500, attack: 10, defense: 80, value: 9999, speed: 3.0 };
+                default: return { role: 'Minion', hp: 200, maxHp: 200, mana: 0, maxMana: 100, attack: 40, defense: 10, value: 100, speed: 2.0 };
+            }
+        };
+
+        const createPiece = (type, color, idSuffix) => {
+            const stats = getBaseStats(type);
+            return {
+                ...stats,
+                id: `${color}-${type}-${idSuffix}`,
+                type,
+                color,
+                level: 1,
+                xp: 0,
+                maxXp: 100,
+                skills: getSkills(stats.role),
+                currentCooldown: 0,
+                maxCooldown: 100
+            };
+        };
+
+        const initialBoardSetup = () => {
+            const board = Array(8).fill(null).map(() => Array(8).fill(null));
+            const backRow = ['r', 'n', 'b', 'q', 'k', 'b', 'n', 'r'];
+            backRow.forEach((type, col) => board[0][col] = createPiece(type, 'red', `0-${col}`));
+            Array(8).fill(null).forEach((_, col) => board[1][col] = createPiece('p', 'red', `1-${col}`));
+            Array(8).fill(null).forEach((_, col) => board[6][col] = createPiece('p', 'blue', `6-${col}`));
+            backRow.forEach((type, col) => board[7][col] = createPiece(type, 'blue', `7-${col}`));
+            return board;
+        };
+
+        const getPieceIcon = (type) => {
+            const icons = { 'k': '♚', 'q': '♛', 'r': '♜', 'b': '♝', 'n': '♞', 'p': '♟︎' };
+            return icons[type];
+        };
+
+        const isValidPos = (r, c) => r >= 0 && r < 8 && c >= 0 && c < 8;
+
+        // --- Main Component ---
+        function RealTimeActionChess() {
+            const [gameStatus, setGameStatus] = useState('lobby');
+            const [countDown, setCountDown] = useState(3);
+            const [currentMode, setCurrentMode] = useState('legends');
+            const [mmr, setMmr] = useState(500);
+            const [matchType, setMatchType] = useState('single');
+            const [aiDifficultyDelay, setAiDifficultyDelay] = useState(1200);
+            const [selectedDifficulty, setSelectedDifficulty] = useState(DIFFICULTIES[2]);
+            const [lpChange, setLpChange] = useState(null);
+            const [opponentName, setOpponentName] = useState("AI Opponent");
+            const [connectionLog, setConnectionLog] = useState("");
+
+            useEffect(() => {
+                const savedMMR = localStorage.getItem('heroChessMMR');
+                if (savedMMR) setMmr(parseInt(savedMMR));
+            }, []);
+
+            const [board, setBoard] = useState(initialBoardSetup());
+            const [graveyard, setGraveyard] = useState([]);
+            const [selectedPos, setSelectedPos] = useState(null);
+            const [validMoves, setValidMoves] = useState([]);
+            const [logs, setLogs] = useState(['Hero Chess 4.0 Official']);
+            const [winner, setWinner] = useState(null);
+            const [activeSkill, setActiveSkill] = useState(null);
+            const [effects, setEffects] = useState([]);
+            const [screenShake, setScreenShake] = useState(0);
+            const [draggedPos, setDraggedPos] = useState(null);
+            const [killStreak, setKillStreak] = useState(0);
+            const [streakText, setStreakText] = useState(null);
+            const [particles, setParticles] = useState([]);
+            const [hitStop, setHitStop] = useState(0);
+            const [gameItems, setGameItems] = useState([]);
+            const [freezeTime, setFreezeTime] = useState(0);
+
+            const effectIdRef = useRef(0);
+            const particleIdRef = useRef(0);
+            const itemIdRef = useRef(0);
+            const lastAiActionTimeRef = useRef(0);
+            const lastItemSpawnTimeRef = useRef(0);
+            const graveyardRef = useRef([]);
+            const killStreakTimeoutRef = useRef(null);
+
+            useEffect(() => { graveyardRef.current = graveyard; }, [graveyard]);
+
+            const addLog = (msg) => setLogs(prev => [msg, ...prev].slice(0, 3));
+
+            const triggerEffect = (row, col, type, text, scale = 1) => {
+                const id = effectIdRef.current++;
+                setEffects(prev => [...prev, { id, row, col, type, text, scale }]);
+                setTimeout(() => {
+                    setEffects(prev => prev.filter(e => e.id !== id));
+                }, 800);
+            };
+
+            const spawnParticles = (r, c, color, count, type = 'spark') => {
+                const newParticles = [];
+                for(let i=0; i<count; i++) {
+                    const angle = Math.random() * Math.PI * 2;
+                    const speed = Math.random() * (type === 'explosion' ? 0.3 : 0.15) + 0.05;
+                    newParticles.push({
+                        id: particleIdRef.current++,
+                        r, c,
+                        vx: Math.cos(angle) * speed,
+                        vy: Math.sin(angle) * speed,
+                        life: 1.0,
+                        decay: 0.02 + Math.random() * 0.03,
+                        color,
+                        size: Math.random() * (type === 'explosion' ? 8 : 4) + 2,
+                        gravity: type === 'explosion' ? 0.01 : 0
+                    });
+                }
+                setParticles(prev => [...prev, ...newParticles]);
+            };
+
+            const triggerKillStreak = () => {
+                setKillStreak(prev => prev + 1);
+                if (killStreakTimeoutRef.current) clearTimeout(killStreakTimeoutRef.current);
+                
+                let text = "KILL";
+                const k = killStreak + 1;
+                if (k === 2) text = "DOUBLE KILL";
+                else if (k === 3) text = "TRIPLE KILL";
+                else if (k === 4) text = "QUADRA KILL";
+                else if (k >= 5) text = "PENTA KILL";
+
+                setStreakText(text);
+                killStreakTimeoutRef.current = setTimeout(() => {
+                    setKillStreak(0);
+                    setStreakText(null);
+                }, 3000);
+            };
+
+            const initGame = (type, mode, difficulty) => {
+                setMatchType(type);
+                setCurrentMode(mode);
+                setBoard(initialBoardSetup());
+                setGraveyard([]);
+                setGameItems([]);
+                setWinner(null);
+                setParticles([]);
+                setFreezeTime(0);
+                setLpChange(null);
+
+                if (type === 'ranked') {
+                    const normalized = Math.max(0, Math.min(1, (mmr - 300) / 2700));
+                    setAiDifficultyDelay(2000 - (normalized * 1800));
+                    const opponents = ["Faker_Fan", "ChessKing", "NoobSlayer", "AlphaGo_V2", "GrandMaster_KR"];
+                    setOpponentName(opponents[Math.floor(Math.random() * opponents.length)]);
+                    setGameStatus('matching');
+                    
+                    setTimeout(() => {
+                        setGameStatus('countdown');
+                        setCountDown(3);
+                    }, 2000); 
+                } else if (type === 'normal_p2p') {
+                    setOpponentName("Remote_User_12");
+                    setAiDifficultyDelay(1000); 
+                    setGameStatus('connecting');
+                    setConnectionLog("Initializing WebRTC...");
+                    setTimeout(() => setConnectionLog("Generating ICE Candidates..."), 800);
+                    setTimeout(() => setConnectionLog("Signaling Server Connected..."), 1500);
+                    setTimeout(() => setConnectionLog("Exchanging SDP Offer/Answer..."), 2200);
+                    setTimeout(() => setConnectionLog("P2P Connection Established!"), 3000);
+                    setTimeout(() => {
+                        setGameStatus('countdown');
+                        setCountDown(3);
+                    }, 3500);
+                } else {
+                    setAiDifficultyDelay(difficulty ? difficulty.aiDelay : 1200);
+                    setSelectedDifficulty(difficulty || DIFFICULTIES[2]);
+                    setOpponentName(`AI (${difficulty?.label || 'Normal'})`);
+                    setGameStatus('countdown');
+                    setCountDown(3);
+                }
+            };
+
+            const endGame = (win) => {
+                setWinner(win ? "VICTORY" : "DEFEAT");
+                setGameStatus('gameover');
+                
+                if (matchType === 'ranked') {
+                    let change = 0;
+                    if (win) {
+                        change = Math.floor(Math.random() * 11) + 20; 
+                    } else {
+                        const tier = getTier(mmr);
+                        change = -tier.lossPenalty;
+                    }
+                    setLpChange(change);
+                    const newMmr = Math.max(0, mmr + change);
+                    setMmr(newMmr);
+                    localStorage.setItem('heroChessMMR', newMmr.toString());
+                }
+            };
+
+            useEffect(() => {
+                if (gameStatus === 'countdown') {
+                    if (countDown > 0) {
+                        const timer = setTimeout(() => setCountDown(prev => prev - 1), 1000);
+                        return () => clearTimeout(timer);
+                    } else {
+                        setGameStatus('playing');
+                        addLog('전투 시작!');
+                        lastItemSpawnTimeRef.current = Date.now();
+                    }
+                }
+            }, [gameStatus, countDown]);
+
+            const processLevelUp = (piece) => {
+                if (piece.xp >= piece.maxXp && piece.level < 18) {
+                    const newPiece = { ...piece };
+                    newPiece.level += 1;
+                    newPiece.xp -= newPiece.maxXp;
+                    newPiece.maxXp = Math.floor(newPiece.maxXp * 1.2);
+                    newPiece.maxHp = Math.floor(newPiece.maxHp * 1.15);
+                    newPiece.hp = newPiece.maxHp;
+                    newPiece.maxMana = Math.floor(newPiece.maxMana * 1.1);
+                    newPiece.mana = newPiece.maxMana;
+                    newPiece.attack = Math.floor(newPiece.attack * 1.15);
+                    newPiece.defense = Math.floor(newPiece.defense * 1.15);
+                    return { piece: newPiece, leveledUp: true };
+                }
+                return { piece, leveledUp: false };
+            };
+
+            useEffect(() => {
+                if (gameStatus !== 'playing') return;
+
+                const tickRate = 30;
+                const loop = setInterval(() => {
+                    if (hitStop > 0) {
+                        setHitStop(prev => Math.max(0, prev - tickRate));
+                        return; 
+                    }
+                    if (freezeTime > 0) {
+                        setFreezeTime(prev => Math.max(0, prev - tickRate));
+                    }
+
+                    const now = Date.now();
+                    
+                    setParticles(prev => prev.map(p => ({
+                        ...p,
+                        r: p.r + p.vy,
+                        c: p.c + p.vx,
+                        life: p.life - p.decay,
+                        vy: p.vy + p.gravity
+                    })).filter(p => p.life > 0));
+
+                    if (currentMode === 'slowered' && now - lastItemSpawnTimeRef.current > 5000) {
+                        setGameItems(prev => {
+                            if (prev.length >= 5) return prev;
+                            const r = 2 + Math.floor(Math.random() * 4);
+                            const c = Math.floor(Math.random() * 8);
+                            if (prev.some(i => i.row === r && i.col === c)) return prev;
+                            const types = ['potion', 'energy', 'shield', 'freeze'];
+                            const type = types[Math.floor(Math.random() * types.length)];
+                            return [...prev, { id: itemIdRef.current++, row: r, col: c, type }];
+                        });
+                        lastItemSpawnTimeRef.current = now;
+                    }
+
+                    setGraveyard(prevGraveyard => {
+                        const nextGraveyard = [];
+                        prevGraveyard.forEach(dead => {
+                            const timeLeft = dead.respawnTimeLeft - tickRate;
+                            nextGraveyard.push({ ...dead, respawnTimeLeft: Math.max(0, timeLeft) });
+                        });
+                        return nextGraveyard;
+                    });
+
+                    if (freezeTime <= 0) {
+                        setBoard(prevBoard => {
+                            const nextBoard = prevBoard.map(row => row.map(p => p ? { ...p } : null));
+
+                            const currentGraveyard = [...graveyardRef.current];
+                            currentGraveyard.forEach(dead => {
+                                if (dead.respawnTimeLeft <= 0) {
+                                    const spawnRow = dead.piece.color === 'red' ? 0 : 7;
+                                    for (let c = 0; c < 8; c++) {
+                                        if (!nextBoard[spawnRow][c]) {
+                                            nextBoard[spawnRow][c] = { 
+                                                ...dead.piece, 
+                                                hp: dead.piece.maxHp, 
+                                                mana: dead.piece.maxMana, 
+                                                currentCooldown: 50
+                                            };
+                                            spawnParticles(spawnRow, c, '#4ade80', 15, 'explosion');
+                                            triggerEffect(spawnRow, c, 'buff', '부활!', 1.2);
+                                            break;
+                                        }
+                                    }
+                                }
+                            });
+
+                            const speedMultiplier = currentMode === 'slowered' ? 0.7 : 1.0;
+                            for(let r=0; r<8; r++) {
+                                for(let c=0; c<8; c++) {
+                                    const p = nextBoard[r][c];
+                                    if (p && p.currentCooldown > 0) {
+                                        p.currentCooldown = Math.max(0, p.currentCooldown - (p.speed * speedMultiplier * (tickRate/50)));
+                                    }
+                                }
+                            }
+
+                            if (matchType !== 'normal_p2p' && now - lastAiActionTimeRef.current > aiDifficultyDelay) { 
+                                const aiUnits = [];
+                                nextBoard.forEach((row, r) => row.forEach((p, c) => {
+                                    if (p && p.color === 'red' && p.currentCooldown <= 0) {
+                                        aiUnits.push({ pos: { row: r, col: c }, piece: p });
+                                    }
+                                }));
+
+                                if (aiUnits.length > 0) {
+                                    const selectedAI = aiUnits[Math.floor(Math.random() * aiUnits.length)];
+                                    const { pos, piece } = selectedAI;
+                                    let acted = false;
+                                    
+                                    if (piece.skills.length > 0 && Math.random() < 0.4) {
+                                        const skill = piece.skills[Math.floor(Math.random() * piece.skills.length)];
+                                        if (piece.mana >= skill.manaCost) {
+                                            const skillTargets = getSkillTargets(nextBoard, pos, skill);
+                                            const enemies = skillTargets.filter(t => nextBoard[t.row][t.col]?.color === 'blue');
+                                            if (enemies.length > 0) {
+                                                const targetPos = enemies[Math.floor(Math.random() * enemies.length)];
+                                                executeActionOnBoard(nextBoard, pos, targetPos, skill);
+                                                acted = true;
+                                            }
+                                        }
+                                    }
+                                    if (!acted) {
+                                        const moves = getMoves(nextBoard, pos);
+                                        const enemies = moves.filter(t => nextBoard[t.row][t.col]?.color === 'blue');
+                                        
+                                        let itemMove = null;
+                                        if (currentMode === 'slowered') {
+                                            const itemMoves = moves.filter(m => gameItems.some(i => i.row === m.row && i.col === m.col));
+                                            if (itemMoves.length > 0) itemMove = itemMoves[0];
+                                        }
+
+                                        if (enemies.length > 0) {
+                                            executeActionOnBoard(nextBoard, pos, enemies[0], null);
+                                            acted = true;
+                                        } else if (itemMove) {
+                                            executeActionOnBoard(nextBoard, pos, itemMove, null);
+                                            acted = true;
+                                        } else {
+                                            const validMoves = moves.filter(t => !nextBoard[t.row][t.col]);
+                                            if (validMoves.length > 0) {
+                                                validMoves.sort((a, b) => b.row - a.row); 
+                                                if (Math.random() < 0.6) { 
+                                                    executeActionOnBoard(nextBoard, pos, validMoves[0], null);
+                                                    acted = true;
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if (acted) lastAiActionTimeRef.current = now;
+                                }
+                            }
+                            return nextBoard;
+                        });
+                    }
+
+                }, tickRate);
+
+                return () => clearInterval(loop);
+            }, [gameStatus, aiDifficultyDelay, freezeTime, currentMode, gameItems, matchType]);
+
+            useEffect(() => {
+                if (gameStatus !== 'playing') return;
+                const interval = setInterval(() => {
+                    setBoard(currentBoard => {
+                        const idsOnBoard = currentBoard.flat().filter(p => p).map(p => p.id);
+                        setGraveyard(prev => prev.filter(g => !idsOnBoard.includes(g.piece.id) && g.respawnTimeLeft > 0));
+                        return currentBoard;
+                    });
+                }, 1000);
+                return () => clearInterval(interval);
+            }, [gameStatus]);
+
+            const executeActionOnBoard = (currentBoard, from, to, usedSkill) => {
+                const actor = currentBoard[from.row][from.col];
+                const target = currentBoard[to.row][to.col];
+                if (!actor) return;
+
+                if (!usedSkill && currentMode === 'slowered') {
+                    const itemIdx = gameItems.findIndex(i => i.row === to.row && i.col === to.col);
+                    if (itemIdx !== -1) {
+                        const item = gameItems[itemIdx];
+                        switch(item.type) {
+                            case 'potion':
+                                actor.hp = Math.min(actor.maxHp, actor.hp + actor.maxHp * 0.5);
+                                triggerEffect(to.row, to.col, 'heal', 'HP UP!', 1.2);
+                                break;
+                            case 'energy':
+                                actor.currentCooldown = 0;
+                                actor.mana = actor.maxMana;
+                                triggerEffect(to.row, to.col, 'buff', '⚡MAX!', 1.2);
+                                break;
+                            case 'shield':
+                                actor.defense += 10;
+                                triggerEffect(to.row, to.col, 'buff', 'DEF UP', 1.2);
+                                break;
+                            case 'freeze':
+                                setFreezeTime(3000);
+                                triggerEffect(to.row, to.col, 'freeze', '❄️FREEZE!', 2.0);
+                                break;
+                        }
+                        setGameItems(prev => prev.filter(i => i.id !== item.id));
+                    }
+                }
+
+                actor.currentCooldown = actor.maxCooldown;
+
+                if (usedSkill) {
+                    actor.mana -= usedSkill.manaCost;
+                    if (target) {
+                        const dmg = Math.floor(actor.attack * usedSkill.damageRatio);
+                        const actualDmg = Math.max(10, dmg - target.defense);
+                        target.hp -= actualDmg;
+                        triggerEffect(to.row, to.col, 'explosion', `-${actualDmg}`, 1.5);
+                        spawnParticles(to.row, to.col, '#ef4444', 15, 'explosion');
+                        actor.xp += 50;
+                        setScreenShake(2); 
+                        setTimeout(() => setScreenShake(0), 200);
+                    }
+                } else {
+                    if (target) {
+                        const dmg = Math.max(10, actor.attack - target.defense);
+                        target.hp -= dmg;
+                        actor.mana = Math.min(actor.maxMana, actor.mana + 15);
+                        triggerEffect(to.row, to.col, 'hit', `-${dmg}`);
+                        spawnParticles(to.row, to.col, '#ffffff', 5, 'spark');
+                        actor.xp += 30;
+                        setScreenShake(1);
+                        setTimeout(() => setScreenShake(0), 100);
+                    } else {
+                        currentBoard[to.row][to.col] = actor;
+                        currentBoard[from.row][from.col] = null;
+                    }
+                }
+
+                const piecesToCheck = [actor, target].filter(p => p !== null);
+                piecesToCheck.forEach(p => {
+                    if (p === target && p.hp <= 0) {
+                        if (p.type === 'k') {
+                            endGame(actor.color === 'blue'); 
+                        } else {
+                            const deadUnit = { ...p };
+                            setTimeout(() => {
+                                setGraveyard(prev => [...prev, { piece: deadUnit, respawnTimeLeft: 12000 }]);
+                            }, 0);
+                        }
+                        
+                        currentBoard[to.row][to.col] = null;
+                        spawnParticles(to.row, to.col, '#ef4444', 25, 'explosion');
+                        
+                        if (!usedSkill && target && p === target) {
+                            currentBoard[to.row][to.col] = actor;
+                            currentBoard[from.row][from.col] = null;
+                            actor.xp += 100;
+                            if (actor.color === 'blue') triggerKillStreak();
+                        } else {
+                            actor.xp += 80;
+                            if (actor.color === 'blue') triggerKillStreak();
+                        }
+                    }
+
+                    const lv = processLevelUp(p);
+                    if (lv.leveledUp) {
+                        Object.assign(p, lv.piece);
+                        if (p.hp > 0) { 
+                            triggerEffect(p === actor ? from.row : to.row, p === actor ? from.col : to.col, 'levelUp', 'Level Up!', 2.0);
+                            spawnParticles(p === actor ? from.row : to.row, p === actor ? from.col : to.col, '#fbbf24', 40, 'explosion');
+                        }
+                    }
+                });
+            };
+
+            const getMoves = (boardState, pos) => {
+                const piece = boardState[pos.row][pos.col];
+                if (!piece) return [];
+                const moves = [];
+                const { type, color } = piece;
+                const check = (r, c) => {
+                    if (!isValidPos(r, c)) return false;
+                    const target = boardState[r][c];
+                    if (target && target.color === color) return false;
+                    moves.push({ row: r, col: c });
+                    return !target;
+                };
+                const directions = {
+                    straight: [[-1, 0], [1, 0], [0, -1], [0, 1]],
+                    diagonal: [[-1, -1], [-1, 1], [1, -1], [1, 1]],
+                    knight: [[-2, -1], [-2, 1], [-1, -2], [-1, 2], [1, -2], [1, 2], [2, -1], [2, 1]],
+                };
+                if (type === 'n') directions.knight.forEach(([dr, dc]) => check(pos.row + dr, pos.col + dc));
+                else if (type === 'r') directions.straight.forEach(([dr, dc]) => { let r = pos.row + dr, c = pos.col + dc; while (check(r, c)) { r += dr; c += dc; } });
+                else if (type === 'b') directions.diagonal.forEach(([dr, dc]) => { let r = pos.row + dr, c = pos.col + dc; while (check(r, c)) { r += dr; c += dc; } });
+                else if (type === 'q') [...directions.straight, ...directions.diagonal].forEach(([dr, dc]) => { let r = pos.row + dr, c = pos.col + dc; while (check(r, c)) { r += dr; c += dc; } });
+                else if (type === 'k') [...directions.straight, ...directions.diagonal].forEach(([dr, dc]) => check(pos.row + dr, pos.col + dc));
+                else if (type === 'p') {
+                    const dir = color === 'blue' ? -1 : 1;
+                    if (isValidPos(pos.row + dir, pos.col) && !boardState[pos.row + dir][pos.col]) {
+                        moves.push({ row: pos.row + dir, col: pos.col });
+                    }
+                    [[dir, -1], [dir, 1]].forEach(([dr, dc]) => {
+                        const r = pos.row + dr, c = pos.col + dc;
+                        if (isValidPos(r, c)) {
+                            const target = boardState[r][c];
+                            if (target && target.color !== color) moves.push({ row: r, col: c });
+                        }
+                    });
+                }
+                return moves;
+            };
+
+            const getSkillTargets = (boardState, pos, skill) => {
+                const targets = [];
+                for(let r=0; r<8; r++) for(let c=0; c<8; c++) {
+                    const t = boardState[r][c];
+                    const dist = Math.max(Math.abs(r - pos.row), Math.abs(c - pos.col));
+                    if (dist <= skill.range) {
+                        if(t) {
+                            if (skill.type === 'heal' ? t.color === boardState[pos.row][pos.col].color : t.color !== boardState[pos.row][pos.col].color) {
+                                targets.push({row: r, col: c});
+                            }
+                        }
+                    }
+                }
+                return targets;
+            };
+
+            const handleSkillSelect = (skill) => {
+                if (!selectedPos) return;
+                const piece = board[selectedPos.row][selectedPos.col];
+                if (!piece || piece.mana < skill.manaCost) return;
+                setActiveSkill(skill);
+                setValidMoves(getSkillTargets(board, selectedPos, skill));
+            };
+
+            const handleDragStart = (e, r, c) => {
+                const piece = board[r][c];
+                const canControl = piece && (matchType === 'normal_p2p' ? true : piece.color === 'blue');
+                
+                if (canControl && piece.currentCooldown <= 0) {
+                    setDraggedPos({ row: r, col: c });
+                    setSelectedPos({ row: r, col: c });
+                    e.dataTransfer.effectAllowed = "move";
+                } else {
+                    e.preventDefault();
+                }
+            };
+
+            const handleDrop = (e, r, c) => {
+                e.preventDefault();
+                if (!draggedPos) return;
+                const moves = getMoves(board, draggedPos);
+                const isValid = moves.some(m => m.row === r && m.col === c);
+                if (isValid) {
+                    setBoard(prev => {
+                        const next = prev.map(row => [...row]);
+                        executeActionOnBoard(next, draggedPos, { row: r, col: c }, null);
+                        return next;
+                    });
+                    setScreenShake(1);
+                    setTimeout(() => setScreenShake(0), 100);
+                }
+                setDraggedPos(null);
+                setSelectedPos(null);
+                setValidMoves([]);
+            };
+
+            const handleSquareClick = (row, col) => {
+                if (gameStatus !== 'playing') return;
+                const clickedPiece = board[row][col];
+                
+                if (selectedPos && activeSkill) {
+                    if (validMoves.some(m => m.row === row && m.col === col)) {
+                        setBoard(prev => {
+                            const next = prev.map(r => [...r]);
+                            executeActionOnBoard(next, selectedPos, { row, col }, activeSkill);
+                            return next;
+                        });
+                        setActiveSkill(null);
+                        setValidMoves([]);
+                    } else {
+                        setActiveSkill(null);
+                        setValidMoves([]);
+                    }
+                    return;
+                }
+
+                const canSelect = clickedPiece && (matchType === 'normal_p2p' ? true : clickedPiece.color === 'blue');
+
+                if (canSelect) {
+                    if (clickedPiece.currentCooldown > 0) {
+                        triggerEffect(row, col, 'buff', '⏳ 쿨타임');
+                        return;
+                    }
+                    setSelectedPos({ row, col });
+                    setValidMoves(getMoves(board, { row, col }));
+                    setActiveSkill(null);
+                    return;
+                }
+
+                if (selectedPos && validMoves.some(m => m.row === row && m.col === col)) {
+                    setBoard(prev => {
+                        const next = prev.map(r => [...r]);
+                        executeActionOnBoard(next, selectedPos, { row, col }, null);
+                        return next;
+                    });
+                    setSelectedPos(null);
+                    setValidMoves([]);
+                }
+            };
+
+            useEffect(() => {
+                const handleKeyDown = (e) => {
+                    if (gameStatus !== 'playing') return;
+                    if (e.key === 'Escape') {
+                        setSelectedPos(null);
+                        setValidMoves([]);
+                        setActiveSkill(null);
+                        return;
+                    }
+                    if (selectedPos && ['q', 'w', 'e', 'r'].includes(e.key.toLowerCase())) {
+                        const piece = board[selectedPos.row][selectedPos.col];
+                        if (piece && piece.color === 'blue') {
+                            const skillKey = e.key.toUpperCase();
+                            const skill = piece.skills.find(s => s.key === skillKey);
+                            if (skill && piece.mana >= skill.manaCost && piece.currentCooldown <= 0) {
+                                handleSkillSelect(skill);
+                            }
+                        }
+                    }
+                };
+                window.addEventListener('keydown', handleKeyDown);
+                return () => window.removeEventListener('keydown', handleKeyDown);
+            }, [selectedPos, board, gameStatus]);
+
+            const currentTier = getTier(mmr);
+
+            return (
+                <div className={`flex flex-col h-screen bg-slate-950 text-white overflow-hidden font-sans select-none relative touch-none
+                    ${screenShake === 1 ? 'animate-shake-sm' : ''} 
+                    ${screenShake === 2 ? 'animate-shake-lg' : ''}
+                `}>
+                    <div className="absolute inset-0 z-0 pointer-events-none overflow-hidden bg-[#0a0a0f]">
+                        <div className="absolute inset-0 bg-[linear-gradient(to_right,#1f2937_1px,transparent_1px),linear-gradient(to_bottom,#1f2937_1px,transparent_1px)] bg-[size:40px_40px] [mask-image:radial-gradient(ellipse_80%_50%_at_50%_50%,#000_70%,transparent_100%)] opacity-30"></div>
+                        {freezeTime > 0 && <div className="absolute inset-0 bg-cyan-500/20 z-40 pointer-events-none animate-pulse"></div>}
+                    </div>
+                    
+                    <div className="flex-none p-3 sm:p-4 flex justify-between items-center bg-slate-900/50 backdrop-blur-md z-20 relative border-b border-slate-800">
+                        <h1 className="text-xl sm:text-2xl font-black italic tracking-tighter text-transparent bg-clip-text bg-gradient-to-r from-cyan-400 to-purple-500 shadow-neon flex items-center gap-2">
+                            HERO CHESS <span className="text-[10px] sm:text-xs not-italic text-slate-300 bg-slate-800 px-2 py-0.5 rounded border border-slate-700">4.0</span>
+                        </h1>
+                        <div className="flex gap-2 text-xs">
+                            {matchType === 'ranked' && (
+                                <div className={`px-2 py-1 bg-slate-900/80 rounded border flex items-center gap-1 shadow-lg ${currentTier.color}`}>
+                                    <Medal size={12} />
+                                    <span>{currentTier.name} ({mmr})</span>
+                                </div>
+                            )}
+                            {matchType === 'normal_p2p' && (
+                                <div className="px-2 py-1 bg-green-900/50 rounded border border-green-500 flex items-center gap-1">
+                                    <Globe size={12} /> Online
+                                </div>
+                            )}
                         </div>
                     </div>
-                ))}
-            </div>
-        )}
 
-        {/* Board */}
-        <div className="w-full max-w-[600px] aspect-square p-2 ml-16 sm:ml-0"> {/* ml-16 for graveyard space */}
-            <div className="w-full h-full grid grid-cols-8 gap-0.5 bg-slate-900 rounded-lg border border-slate-800 relative shadow-[0_0_50px_rgba(0,0,0,0.5)]">
-                {board.map((row, r) => (
-                    row.map((piece, c) => {
-                        const isSelected = selectedPos?.row === r && selectedPos?.col === c;
-                        const isValid = validMoves.some(m => m.row === r && m.col === c);
-                        const effect = effects.find(e => e.row === r && e.col === c);
-                        const isSkillReady = piece?.color === 'blue' && piece.currentCooldown <= 0 && piece.skills.some(s => piece.mana >= s.manaCost);
+                    <div className="flex-1 relative flex items-center justify-center z-10 p-2">
+                        
+                        {/* Lobby Overlay */}
+                        {gameStatus === 'lobby' && (
+                            <div className="absolute inset-0 z-50 bg-black/90 flex flex-col items-center justify-center animate-fade-in backdrop-blur-md overflow-y-auto">
+                                <div className="text-center mb-6">
+                                    <h1 className="text-5xl sm:text-7xl font-black text-transparent bg-clip-text bg-gradient-to-r from-cyan-400 via-blue-500 to-purple-600 mb-2 drop-shadow-[0_0_30px_rgba(59,130,246,0.6)]">HERO CHESS</h1>
+                                    <p className="text-cyan-200/70 font-mono tracking-[0.5em] text-xs sm:text-sm">OFFICIAL SEASON 1</p>
+                                </div>
 
-                        return (
-                            <div
-                                key={`${r}-${c}`}
-                                onMouseDown={() => handleSquareClick(r, c)}
-                                onDragOver={(e) => e.preventDefault()}
-                                onDrop={(e) => handleDrop(e, r, c)}
-                                draggable={!!piece && piece.color === 'blue' && piece.currentCooldown <= 0}
-                                onDragStart={(e) => handleDragStart(e, r, c)}
-                                className={`
-                                    relative flex items-center justify-center rounded-[2px] transition-colors duration-75
-                                    ${(r + c) % 2 === 0 ? 'bg-slate-800/50' : 'bg-slate-900/50'}
-                                    ${isSelected ? 'bg-cyan-900/40 ring-1 ring-cyan-400' : ''}
-                                    ${isValid && !piece ? 'after:w-2 after:h-2 after:bg-cyan-400/30 after:rounded-full' : ''}
-                                    ${isValid && piece ? 'ring-1 ring-red-500 bg-red-900/20' : ''}
-                                    ${activeSkill && isValid ? 'cursor-crosshair' : ''}
-                                    ${isSkillReady && !isSelected ? 'ring-2 ring-yellow-400/50 z-10 animate-pulse' : ''}
-                                `}
-                            >
-                                {effect && (
-                                    <div className="absolute inset-0 z-50 flex items-center justify-center pointer-events-none">
-                                         <div className={`text-xl font-bold animate-float-up drop-shadow-[0_2px_2px_rgba(0,0,0,1)]
-                                            ${effect.type === 'heal' ? 'text-green-400' : 'text-white'}
-                                            ${effect.type === 'explosion' ? 'text-orange-500 text-3xl' : ''}
-                                            ${effect.type === 'buff' ? 'text-blue-300 text-xs' : ''}
-                                            ${effect.type === 'levelUp' ? 'text-yellow-300 text-lg shadow-black' : ''}
-                                        `}>
-                                            {effect.text}
-                                            {effect.type === 'explosion' && <Flame className="inline w-6 h-6 text-orange-500"/>}
+                                <div className="flex flex-col gap-6 w-full max-w-4xl px-4">
+                                    
+                                    <div className="bg-slate-900/60 p-4 rounded-2xl border border-slate-700">
+                                        <div className="text-xl font-bold mb-3 flex items-center gap-2 text-blue-400"><User size={20}/> SINGLE PLAYER</div>
+                                        <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
+                                            {DIFFICULTIES.map((diff) => (
+                                                <button 
+                                                    key={diff.label}
+                                                    onClick={() => initGame('single', 'legends', diff)}
+                                                    className={`p-2 sm:p-3 border rounded-xl text-sm font-bold hover:scale-105 active:scale-95 transition-all
+                                                        ${diff.color.replace('border-', 'bg-').replace('text-', 'text-black ')}
+                                                        opacity-80 hover:opacity-100
+                                                    `}
+                                                >
+                                                    {diff.label}
+                                                </button>
+                                            ))}
                                         </div>
+                                    </div>
+
+                                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                                        <button 
+                                            onClick={() => initGame('normal_p2p', 'slowered')}
+                                            className="group relative p-6 border-2 border-green-500 rounded-2xl bg-green-900/10 hover:bg-green-900/30 transition-all flex flex-col items-center justify-center text-center overflow-hidden"
+                                        >
+                                            <div className="absolute top-2 right-2"><Globe className="text-green-500 opacity-50"/></div>
+                                            <div className="text-2xl font-bold text-white mb-1 group-hover:scale-105 transition-transform flex items-center gap-2">
+                                                온라인 대전 <span className="text-[10px] bg-green-600 px-1 rounded">P2P</span>
+                                            </div>
+                                            <div className="text-xs text-green-300">Casual Online (Simulated)</div>
+                                            <div className="text-[10px] text-slate-400 mt-2">아이템전 / 점수 변동 없음</div>
+                                        </button>
+
+                                        <button 
+                                            onClick={() => initGame('ranked', 'legends')}
+                                            className="group relative p-6 border-2 border-purple-500 rounded-2xl bg-purple-900/10 hover:bg-purple-900/30 transition-all flex flex-col items-center justify-center text-center overflow-hidden"
+                                        >
+                                            <div className="absolute top-2 right-2"><Trophy className="text-purple-500 opacity-50"/></div>
+                                            <div className="text-2xl font-bold text-white mb-1 group-hover:scale-105 transition-transform flex items-center gap-2">
+                                                랭크 게임 <span className="text-[10px] bg-purple-600 px-1 rounded">S1</span>
+                                            </div>
+                                            <div className="text-xs text-purple-300">Competitive Ladder</div>
+                                            <div className="text-[10px] text-slate-400 mt-2">MMR 매칭 / 승급전 도전</div>
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+
+                        {/* Connecting Overlay */}
+                        {gameStatus === 'connecting' && (
+                            <div className="absolute inset-0 z-50 flex flex-col items-center justify-center bg-black/90 backdrop-blur-sm font-mono">
+                                <Globe size={48} className="text-green-500 animate-pulse mb-4"/>
+                                <div className="text-green-400 text-lg mb-2">ESTABLISHING CONNECTION...</div>
+                                <div className="w-64 h-2 bg-slate-800 rounded-full overflow-hidden mb-2">
+                                    <div className="h-full bg-green-500 animate-progress"></div>
+                                </div>
+                                <div className="text-slate-500 text-xs h-4">{connectionLog}</div>
+                            </div>
+                        )}
+
+                        {/* Matching Overlay */}
+                        {gameStatus === 'matching' && (
+                            <div className="absolute inset-0 z-50 flex flex-col items-center justify-center bg-black/80 backdrop-blur-sm">
+                                <div className="w-16 h-16 border-4 border-t-cyan-500 border-r-purple-500 border-b-blue-500 border-l-transparent rounded-full animate-spin mb-6"></div>
+                                <div className="text-2xl font-bold animate-pulse mb-2">매칭 중...</div>
+                                <div className="text-slate-400 text-sm">[{currentTier.name}] 리그 검색 중</div>
+                            </div>
+                        )}
+
+                        {/* Countdown Overlay */}
+                        {gameStatus === 'countdown' && (
+                            <div className="absolute inset-0 z-50 flex flex-col items-center justify-center bg-black/60 backdrop-blur-sm">
+                                <div className="text-xl text-cyan-400 mb-4 font-bold tracking-widest uppercase animate-slide-in">vs {opponentName}</div>
+                                <div className="text-9xl font-black text-white animate-ping drop-shadow-[0_0_50px_rgba(255,255,255,0.8)]">{countDown}</div>
+                            </div>
+                        )}
+
+                        {/* Kill Streak UI */}
+                        {streakText && (
+                            <div className="absolute top-10 z-40 w-full text-center pointer-events-none">
+                                <div className="text-5xl sm:text-7xl font-black text-transparent bg-clip-text bg-gradient-to-b from-red-500 to-red-800 drop-shadow-[0_5px_5px_rgba(0,0,0,1)] animate-bounce tracking-widest scale-125 stroke-white">
+                                    {streakText}
+                                </div>
+                            </div>
+                        )}
+
+                        {/* Game Over Overlay */}
+                        {gameStatus === 'gameover' && (
+                            <div className="absolute inset-0 z-50 bg-black/90 flex flex-col items-center justify-center animate-fade-in backdrop-blur-sm">
+                                <h2 className="text-5xl sm:text-7xl font-black mb-4 text-transparent bg-clip-text bg-gradient-to-b from-yellow-300 to-yellow-600 drop-shadow-[0_0_30px_rgba(234,179,8,0.5)] animate-pulse">
+                                    {winner}
+                                </h2>
+                                
+                                {matchType === 'ranked' && lpChange !== null && (
+                                    <div className={`text-3xl font-bold mb-8 flex items-center gap-2 ${lpChange > 0 ? 'text-green-400' : 'text-red-500'}`}>
+                                        {lpChange > 0 ? '+' : ''}{lpChange} LP
+                                        <div className="flex flex-col items-start ml-2">
+                                            <span className="text-xs text-slate-500 font-normal">CURRENT</span>
+                                            <span className="text-sm text-slate-300 font-normal">{mmr} LP</span>
+                                        </div>
+                                        <Save size={16} className="text-slate-500 ml-2"/>
                                     </div>
                                 )}
 
-                                {piece && (
-                                    <div className={`relative w-full h-full flex items-center justify-center group ${piece.currentCooldown > 0 ? 'grayscale opacity-70' : 'cursor-grab active:cursor-grabbing'}`}>
-                                        {/* Cooldown Overlay */}
-                                        {piece.currentCooldown > 0 && (
-                                            <div className="absolute inset-0 bg-black/40 z-10 flex items-end justify-center">
-                                                <div className="w-full bg-cyan-500/20 origin-bottom transition-all duration-75" style={{ height: `${(piece.currentCooldown / piece.maxCooldown) * 100}%` }} />
-                                            </div>
-                                        )}
-                                        {/* HP Bar */}
-                                        <div className="absolute top-1 w-[80%] h-0.5 bg-black rounded-full overflow-hidden z-20">
-                                            <div className={`h-full ${piece.color === 'blue' ? 'bg-green-400' : 'bg-red-500'}`} style={{ width: `${(piece.hp / piece.maxHp) * 100}%` }} />
+                                <button onClick={() => setGameStatus('lobby')} className="px-8 py-4 sm:px-10 sm:py-5 bg-white text-black font-black text-xl sm:text-2xl rounded-full hover:scale-110 transition-transform flex items-center gap-3 shadow-[0_0_20px_white]">
+                                    <RotateCcw size={24} /> 로비로 돌아가기
+                                </button>
+                            </div>
+                        )}
+
+                        {/* Graveyard UI */}
+                        {gameStatus === 'playing' && (
+                            <div className="absolute left-2 top-2 bottom-2 w-16 sm:w-20 bg-slate-900/90 rounded-xl border border-slate-700/50 p-2 flex flex-col gap-2 overflow-y-auto z-10 backdrop-blur-md shadow-2xl no-scrollbar">
+                                <div className="text-[10px] text-center text-slate-400 font-bold border-b border-slate-700 pb-2 mb-1 flex justify-center items-center gap-1 uppercase tracking-wider">
+                                    <Ghost size={12}/> Respawn
+                                </div>
+                                {graveyard.map((g, i) => (
+                                    <div key={i} className="relative bg-slate-800/80 rounded-lg p-1 opacity-90 border border-slate-700/50 flex flex-col items-center">
+                                        <div className={`text-xl sm:text-2xl mb-1 ${g.piece.color === 'blue' ? 'text-cyan-400 drop-shadow-[0_0_5px_cyan]' : 'text-red-400 drop-shadow-[0_0_5px_red]'}`}>
+                                            {getPieceIcon(g.piece.type)}
                                         </div>
-                                        {/* Icon */}
-                                        <div className={`text-3xl sm:text-4xl z-20 transition-transform ${piece.currentCooldown <= 0 ? 'scale-100 hover:scale-110' : 'scale-95'} ${piece.color === 'blue' ? 'text-cyan-100 drop-shadow-[0_0_5px_rgba(34,211,238,0.5)]' : 'text-rose-100 drop-shadow-[0_0_5px_rgba(244,63,94,0.5)]'}`}>
-                                            {getPieceIcon(piece.type)}
+                                        <div className="w-full bg-slate-950 h-1 rounded-full overflow-hidden mb-1">
+                                            <div className="h-full bg-yellow-500 transition-all duration-1000 ease-linear" style={{ width: `${(g.respawnTimeLeft/12000)*100}%` }}></div>
                                         </div>
-                                        {/* Lv Badge */}
-                                        <div className="absolute top-0 left-0 bg-black/60 text-[8px] sm:text-[10px] text-yellow-400 px-1 rounded-br z-20 font-bold">{piece.level}</div>
-                                        {/* Mana Bar */}
-                                        <div className="absolute bottom-1 w-[60%] h-0.5 bg-black rounded-full overflow-hidden z-20">
-                                            <div className="h-full bg-blue-500" style={{ width: `${(piece.mana / piece.maxMana) * 100}%` }} />
+                                        <div className="text-[9px] font-mono text-white/70">
+                                            {Math.ceil(g.respawnTimeLeft / 1000)}s
                                         </div>
                                     </div>
+                                ))}
+                            </div>
+                        )}
+
+                        {/* Board */}
+                        <div className="w-full max-w-[600px] aspect-square p-1 sm:p-2 ml-16 sm:ml-24 relative perspective-1000">
+                            <div className="w-full h-full grid grid-cols-8 gap-[1px] sm:gap-[2px] bg-slate-900/50 backdrop-blur-sm rounded-xl border border-slate-700/50 relative shadow-[0_0_60px_rgba(0,0,0,0.8)] overflow-hidden ring-1 ring-slate-800">
+                                {/* Particle Layer */}
+                                <div className="absolute inset-0 pointer-events-none z-30 overflow-hidden">
+                                    {particles.map(p => (
+                                        <div 
+                                            key={p.id}
+                                            className="absolute rounded-full shadow-[0_0_5px_currentColor]"
+                                            style={{
+                                                left: `${(p.c + 0.5) * 12.5}%`,
+                                                top: `${(p.r + 0.5) * 12.5}%`,
+                                                width: p.size,
+                                                height: p.size,
+                                                backgroundColor: p.color,
+                                                opacity: p.life,
+                                                transform: 'translate(-50%, -50%)',
+                                            }}
+                                        />
+                                    ))}
+                                </div>
+
+                                {/* Items Layer */}
+                                {currentMode === 'slowered' && gameItems.map(item => (
+                                    <div 
+                                        key={item.id}
+                                        className="absolute flex items-center justify-center z-20 pointer-events-none animate-bounce"
+                                        style={{
+                                            left: `${item.col * 12.5}%`,
+                                            top: `${item.row * 12.5}%`,
+                                            width: '12.5%',
+                                            height: '12.5%',
+                                        }}
+                                    >
+                                        <div className="bg-black/50 p-1 rounded-full backdrop-blur-sm border border-white/20">
+                                            {item.type === 'potion' && <Heart size={16} className="text-red-500 fill-red-500 drop-shadow-md sm:w-5 sm:h-5"/>}
+                                            {item.type === 'energy' && <Zap size={16} className="text-yellow-400 fill-yellow-400 drop-shadow-md sm:w-5 sm:h-5"/>}
+                                            {item.type === 'shield' && <Shield size={16} className="text-blue-400 fill-blue-400 drop-shadow-md sm:w-5 sm:h-5"/>}
+                                            {item.type === 'freeze' && <Snowflake size={16} className="text-cyan-300 drop-shadow-md sm:w-5 sm:h-5"/>}
+                                        </div>
+                                    </div>
+                                ))}
+
+                                {board.map((row, r) => (
+                                    row.map((piece, c) => {
+                                        const isSelected = selectedPos?.row === r && selectedPos?.col === c;
+                                        const isValid = validMoves.some(m => m.row === r && m.col === c);
+                                        const effect = effects.find(e => e.row === r && e.col === c);
+                                        const isControllable = piece && (piece.color === 'blue');
+                                        const isSkillReady = isControllable && piece.currentCooldown <= 0 && piece.skills.some(s => piece.mana >= s.manaCost);
+
+                                        return (
+                                            <div
+                                                key={`${r}-${c}`}
+                                                onMouseDown={() => handleSquareClick(r, c)}
+                                                onDragOver={(e) => e.preventDefault()}
+                                                onDrop={(e) => handleDrop(e, r, c)}
+                                                draggable={!!piece && isControllable && piece.currentCooldown <= 0}
+                                                onDragStart={(e) => handleDragStart(e, r, c)}
+                                                className={`
+                                                    relative flex items-center justify-center rounded-[4px] transition-all duration-100
+                                                    ${(r + c) % 2 === 0 ? 'bg-white/5' : 'bg-transparent'}
+                                                    ${isSelected ? 'bg-cyan-500/20 ring-1 ring-cyan-400 shadow-[inset_0_0_20px_rgba(34,211,238,0.2)]' : ''}
+                                                    ${isValid && !piece ? 'after:w-2 after:h-2 sm:after:w-3 sm:after:h-3 after:bg-cyan-400/30 after:rounded-full after:shadow-[0_0_10px_cyan]' : ''}
+                                                    ${isValid && piece ? 'ring-2 ring-red-500/70 bg-red-900/20' : ''}
+                                                    ${activeSkill && isValid ? 'cursor-crosshair' : ''}
+                                                    ${isSkillReady && !isSelected ? 'ring-1 ring-yellow-400/60 shadow-[inset_0_0_15px_rgba(250,204,21,0.2)]' : ''}
+                                                `}
+                                            >
+                                                {effect && (
+                                                    <div className="absolute inset-0 z-50 flex items-center justify-center pointer-events-none">
+                                                        <div className={`text-lg sm:text-xl font-black animate-float-up drop-shadow-[0_2px_4px_rgba(0,0,0,1)]
+                                                            ${effect.type === 'heal' ? 'text-green-400' : 'text-white'}
+                                                            ${effect.type === 'explosion' ? 'text-orange-500 text-3xl sm:text-4xl' : ''}
+                                                            ${effect.type === 'buff' ? 'text-blue-300 text-[10px]' : ''}
+                                                            ${effect.type === 'levelUp' ? 'text-yellow-300 text-xl sm:text-2xl font-black shadow-black' : ''}
+                                                            ${effect.type === 'freeze' ? 'text-cyan-200 text-lg' : ''}
+                                                        `}
+                                                        style={{ transform: `scale(${effect.scale || 1})` }}
+                                                        >
+                                                            {effect.text}
+                                                            {effect.type === 'explosion' && <Flame className="inline w-6 h-6 sm:w-8 sm:h-8 text-orange-500 ml-1"/>}
+                                                            {effect.type === 'levelUp' && <Star className="inline w-5 h-5 sm:w-6 sm:h-6 text-yellow-400 ml-1 fill-yellow-400"/>}
+                                                        </div>
+                                                    </div>
+                                                )}
+
+                                                {piece && (
+                                                    <div className={`relative w-full h-full flex items-center justify-center group ${piece.currentCooldown > 0 ? 'grayscale opacity-60' : 'cursor-grab active:cursor-grabbing hover:scale-105'}`}>
+                                                        <div className={`absolute inset-2 rounded-full blur-lg opacity-20 pointer-events-none ${piece.color === 'blue' ? 'bg-cyan-500' : 'bg-red-500'}`}></div>
+                                                        {piece.currentCooldown > 0 && (
+                                                            <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/40">
+                                                                <div className="text-[9px] sm:text-[10px] font-mono text-white/80">{Math.ceil(piece.currentCooldown / 10)}</div>
+                                                            </div>
+                                                        )}
+                                                        <div className="absolute top-1 w-[80%] h-[2px] sm:h-[3px] bg-slate-900 rounded-full overflow-hidden z-20 shadow">
+                                                            <div className={`h-full ${piece.color === 'blue' ? 'bg-green-400' : 'bg-red-500'}`} style={{ width: `${(piece.hp / piece.maxHp) * 100}%` }} />
+                                                        </div>
+                                                        <div className={`text-3xl sm:text-5xl z-20 transition-transform ${piece.color === 'blue' ? 'text-cyan-100 drop-shadow-[0_0_15px_rgba(34,211,238,0.4)]' : 'text-rose-100 drop-shadow-[0_0_15px_rgba(244,63,94,0.4)]'}`}>
+                                                            {getPieceIcon(piece.type)}
+                                                        </div>
+                                                        <div className="absolute top-0 left-0 bg-slate-900 text-[8px] sm:text-[9px] text-yellow-400 px-1 py-[1px] rounded-br z-20 font-bold shadow-sm border-r border-b border-slate-700">
+                                                            {piece.level}
+                                                        </div>
+                                                        <div className="absolute bottom-1 w-[60%] h-[2px] sm:h-[3px] bg-slate-900 rounded-full overflow-hidden z-20 shadow">
+                                                            <div className="h-full bg-blue-500" style={{ width: `${(piece.mana / piece.maxMana) * 100}%` }} />
+                                                        </div>
+                                                    </div>
+                                                )}
+                                            </div>
+                                        );
+                                    })
+                                ))}
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* Control Panel */}
+                    <div className="flex-none bg-slate-900/90 backdrop-blur-md border-t border-slate-800 p-2 sm:p-4 safe-area-pb z-20 shadow-[0_-10px_40px_rgba(0,0,0,0.5)]">
+                        {selectedPos && board[selectedPos.row][selectedPos.col] && gameStatus === 'playing' ? (
+                            <div className="max-w-xl mx-auto">
+                                <div className="flex items-center justify-between mb-2">
+                                    <span className="font-bold text-cyan-400 text-base sm:text-lg flex items-center gap-2">
+                                        {board[selectedPos.row][selectedPos.col].role}
+                                        <span className="text-xs text-yellow-400 border border-yellow-500/30 px-2 py-0.5 rounded bg-yellow-500/10 shadow-[0_0_10px_rgba(250,204,21,0.2)]">Lv.{board[selectedPos.row][selectedPos.col].level}</span>
+                                    </span>
+                                    <span className="text-xs text-slate-400 flex items-center gap-3 font-mono">
+                                        <span className="text-green-400">HP {board[selectedPos.row][selectedPos.col].hp}</span>
+                                        <span className="text-blue-400">MP {board[selectedPos.row][selectedPos.col].mana}</span>
+                                    </span>
+                                </div>
+                                <div className="grid grid-cols-4 gap-2 sm:gap-3 h-14 sm:h-16">
+                                    {board[selectedPos.row][selectedPos.col].skills.map(skill => {
+                                        const isReady = board[selectedPos.row][selectedPos.col].currentCooldown <= 0 && board[selectedPos.row][selectedPos.col].mana >= skill.manaCost;
+                                        const canControl = board[selectedPos.row][selectedPos.col].color === 'blue';
+                                        return (
+                                            <button
+                                                key={skill.key}
+                                                onClick={() => handleSkillSelect(skill)}
+                                                disabled={!canControl || board[selectedPos.row][selectedPos.col].currentCooldown > 0 || board[selectedPos.row][selectedPos.col].mana < skill.manaCost}
+                                                className={`rounded-xl bg-slate-800 border border-slate-700 flex flex-col items-center justify-center relative overflow-hidden group transition-all
+                                                    ${activeSkill?.key === skill.key ? 'border-yellow-400 bg-yellow-900/20 ring-1 ring-yellow-400' : ''}
+                                                    ${isReady && canControl ? 'hover:bg-slate-700 hover:border-slate-500 shadow-lg' : 'opacity-50 cursor-not-allowed grayscale'}
+                                                    active:scale-95
+                                                `}
+                                            >
+                                                <span className="text-[9px] sm:text-[10px] font-bold text-yellow-400 absolute top-1 left-2 bg-black/60 px-1.5 rounded-full">{skill.key}</span>
+                                                <span className="text-xs text-white font-bold mt-3 group-hover:text-cyan-300 transition-colors">{skill.name}</span>
+                                                <span className="text-[9px] text-blue-300 mt-0.5">{skill.manaCost} MP</span>
+                                                {isReady && canControl && <div className="absolute inset-0 rounded-xl ring-1 ring-inset ring-white/10 group-hover:ring-white/30"></div>}
+                                            </button>
+                                        );
+                                    })}
+                                    {[...Array(4 - board[selectedPos.row][selectedPos.col].skills.length)].map((_, i) => (
+                                        <div key={i} className="rounded-xl bg-slate-900/50 border border-slate-800 flex items-center justify-center">
+                                            <span className="text-slate-700 text-xs">Locked</span>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        ) : (
+                            <div className="text-center text-slate-500 text-sm h-16 sm:h-20 flex flex-col items-center justify-center gap-2">
+                                {gameStatus === 'playing' ? (
+                                    <>
+                                        <Hand size={20} className="animate-bounce mb-1 opacity-50 text-cyan-400"/>
+                                        <div className="text-xs uppercase tracking-widest opacity-70">Tap or Drag to Command</div>
+                                    </>
+                                ) : (
+                                    <div className="text-slate-600">게임 대기중...</div>
                                 )}
                             </div>
-                        );
-                    })
-                ))}
-            </div>
-        </div>
-      </div>
-
-      {/* Control Panel */}
-      <div className="flex-none bg-slate-900 border-t border-slate-800 p-4 safe-area-pb">
-        {selectedPos && board[selectedPos.row][selectedPos.col] && gameStatus === 'playing' ? (
-            <div className="max-w-xl mx-auto">
-                <div className="flex items-center justify-between mb-2">
-                     <span className="font-bold text-cyan-400 text-lg flex items-center gap-2">
-                        {board[selectedPos.row][selectedPos.col]!.role}
-                        <span className="text-xs text-yellow-400 border border-yellow-500/30 px-1.5 rounded">Lv.{board[selectedPos.row][selectedPos.col]!.level}</span>
-                     </span>
-                     <span className="text-xs text-slate-400">Q W E R / ESC</span>
+                        )}
+                    </div>
                 </div>
-                <div className="grid grid-cols-4 gap-2 h-14">
-                    {board[selectedPos.row][selectedPos.col]!.skills.map(skill => (
-                        <button
-                            key={skill.key}
-                            onClick={() => handleSkillSelect(skill)}
-                            disabled={board[selectedPos.row][selectedPos.col]!.currentCooldown > 0 || board[selectedPos.row][selectedPos.col]!.mana < skill.manaCost}
-                            className={`rounded bg-slate-800 border border-slate-700 flex flex-col items-center justify-center relative overflow-hidden
-                                ${activeSkill?.key === skill.key ? 'border-yellow-400 bg-yellow-900/20' : ''}
-                                disabled:opacity-30 disabled:cursor-not-allowed hover:bg-slate-700 active:scale-95 transition-all
-                            `}
-                        >
-                            <span className="text-xs font-bold text-yellow-400 absolute top-1 left-2">{skill.key}</span>
-                            <span className="text-[10px] text-white mt-3">{skill.name}</span>
-                        </button>
-                    ))}
-                    {[...Array(4 - board[selectedPos.row][selectedPos.col]!.skills.length)].map((_, i) => (
-                        <div key={i} className="rounded bg-slate-900/50 border border-slate-800"></div>
-                    ))}
-                </div>
-            </div>
-        ) : (
-            <div className="text-center text-slate-500 text-sm h-20 flex flex-col items-center justify-center gap-1">
-                {gameStatus === 'playing' ? (
-                    <>
-                        <Hand size={24} className="animate-bounce mb-1 opacity-50"/>
-                        <div>유닛을 클릭하거나 드래그하여 명령을 내리세요</div>
-                    </>
-                ) : (
-                    <div className="text-slate-600">게임 대기중...</div>
-                )}
-            </div>
-        )}
-      </div>
+            );
+        }
 
-      <style>{`
-        @keyframes shake {
-          0%, 100% { transform: translateX(0); }
-          25% { transform: translateX(-5px); }
-          75% { transform: translateX(5px); }
-        }
-        .animate-shake { animation: shake 0.2s ease-in-out; }
-        .safe-area-pb { padding-bottom: env(safe-area-inset-bottom); }
-        .animate-float-up { animation: float-up 1s ease-out forwards; }
-        @keyframes float-up {
-          0% { transform: translateY(0) scale(1); opacity: 1; }
-          100% { transform: translateY(-20px) scale(1.2); opacity: 0; }
-        }
-      `}</style>
-    </div>
-  );
-}
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<RealTimeActionChess />);
+    </script>
+</body>
+</html>
